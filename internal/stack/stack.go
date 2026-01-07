@@ -75,9 +75,13 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 	s.stack = stack.New(opts)
 
 	// Create link endpoint from TUN device
+	// TUN devices provide raw IP packets (no ethernet header)
+	// Need to duplicate the FD because gVisor takes ownership
+	fd := tunDev.File()
 	linkEP, err := fdbased.New(&fdbased.Options{
-		FDs: []int{tunDev.File()},
-		MTU: uint32(cfg.MTU),
+		FDs:            []int{fd},
+		MTU:            uint32(cfg.MTU),
+		EthernetHeader: false, // TUN = Layer 3, no ethernet
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create link endpoint: %w", err)
@@ -87,6 +91,16 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 	// Create NIC
 	if err := s.stack.CreateNIC(nicID, linkEP); err != nil {
 		return nil, fmt.Errorf("failed to create NIC: %s", err)
+	}
+
+	// Enable promiscuous mode to accept all packets (not just those for our IP)
+	if err := s.stack.SetPromiscuousMode(nicID, true); err != nil {
+		return nil, fmt.Errorf("failed to set promiscuous mode: %s", err)
+	}
+
+	// Enable spoofing to allow sending packets from any source
+	if err := s.stack.SetSpoofing(nicID, true); err != nil {
+		return nil, fmt.Errorf("failed to enable spoofing: %s", err)
 	}
 
 	// Add IPv4 address
