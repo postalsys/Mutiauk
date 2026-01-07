@@ -102,11 +102,35 @@ func (c *Client) UDPAssociate(ctx context.Context, localAddr *net.UDPAddr) (*UDP
 	// Clear deadline
 	conn.SetDeadline(time.Time{})
 
+	// Fix relay address if server returns localhost/unspecified
+	// Some SOCKS5 servers return 0.0.0.0 or 127.0.0.1 as relay address
+	// In these cases, use the SOCKS5 server's address instead
+	if relayAddr.IP != nil && (relayAddr.IP.IsLoopback() || relayAddr.IP.IsUnspecified()) {
+		serverHost, _, _ := net.SplitHostPort(c.ServerAddr)
+		serverIP := net.ParseIP(serverHost)
+		if serverIP == nil {
+			// Hostname - resolve it
+			ips, err := net.LookupIP(serverHost)
+			if err == nil && len(ips) > 0 {
+				serverIP = ips[0]
+			}
+		}
+		if serverIP != nil {
+			relayAddr.IP = serverIP
+			if serverIP.To4() != nil {
+				relayAddr.Type = AddrTypeIPv4
+			} else {
+				relayAddr.Type = AddrTypeIPv6
+			}
+		}
+	}
+
 	// Create UDP connection to relay
-	udpConn, err := net.DialUDP("udp", nil, relayAddr.ToUDPAddr())
+	relayUDP := relayAddr.ToUDPAddr()
+	udpConn, err := net.DialUDP("udp", nil, relayUDP)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to connect to relay: %w", err)
+		return nil, fmt.Errorf("failed to connect to relay %s: %w", relayUDP.String(), err)
 	}
 
 	return &UDPRelay{

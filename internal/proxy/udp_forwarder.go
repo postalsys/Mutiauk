@@ -106,6 +106,7 @@ func (f *UDPForwarder) HandleUDP(ctx context.Context, conn net.PacketConn, srcAd
 	f.logger.Debug("UDP forwarding started",
 		zap.String("src", srcAddr.String()),
 		zap.String("dst", dstAddr.String()),
+		zap.String("relay_local", relay.LocalAddr().String()),
 	)
 
 	// Forward packets bidirectionally
@@ -169,6 +170,7 @@ func (f *UDPForwarder) relay(ctx context.Context, local net.PacketConn, relay *s
 			default:
 			}
 
+			local.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, _, err := local.ReadFrom(buf)
 			if err != nil {
 				errCh <- err
