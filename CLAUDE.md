@@ -60,7 +60,8 @@ make logs
 ### Data Flow
 
 ```
-Application → TUN Device → gVisor Stack → TCP/UDP Forwarder → SOCKS5 Proxy → Target
+TCP: Application → TUN → gVisor Stack → TCP Forwarder → SOCKS5 CONNECT → Target
+UDP: Application → TUN → Intercept Endpoint → Raw UDP Forwarder → SOCKS5 UDP ASSOCIATE → Target
 ```
 
 ### Core Components
@@ -72,9 +73,15 @@ Application → TUN Device → gVisor Stack → TCP/UDP Forwarder → SOCKS5 Pro
 4. Applies routes via netlink
 5. Handles SIGHUP for hot reload
 
-**stack/stack.go** - Wraps gVisor's `tcpip/stack` package. Uses `tcp.NewForwarder` and `udp.NewForwarder` to intercept connections, converts them to `net.Conn`/`net.PacketConn` via `gonet`, then passes to handlers.
+**stack/stack.go** - Wraps gVisor's `tcpip/stack` package. Uses `tcp.NewForwarder` to intercept TCP connections, converts them to `net.Conn` via `gonet`, then passes to handlers. UDP is handled separately via link-layer interception.
 
-**proxy/tcp_forwarder.go** and **proxy/udp_forwarder.go** - Implement `TCPHandler`/`UDPHandler` interfaces. Establish SOCKS5 connections and perform bidirectional data copy.
+**stack/intercept_endpoint.go** - Wraps gVisor's link endpoint to intercept UDP packets at the link layer. This is necessary because gVisor's `udp.NewForwarder` only handles packets destined for local addresses, not outbound traffic. The intercept endpoint parses raw IP/UDP headers and passes payloads to the `RawUDPHandler`.
+
+**proxy/tcp_forwarder.go** - Implements `TCPHandler` interface. Establishes SOCKS5 CONNECT and performs bidirectional data copy. Supports `PreConnect` for accurate port scanning.
+
+**proxy/udp_forwarder.go** - Legacy UDP handler using gVisor's UDP forwarder (for local-destined packets).
+
+**proxy/raw_udp_forwarder.go** - Implements `RawUDPHandler` interface for intercepted UDP. Uses SOCKS5 UDP ASSOCIATE to relay datagrams. Maintains a pool of relay sessions with TTL-based cleanup.
 
 **socks5/client.go** - SOCKS5 client supporting CONNECT (TCP) and UDP ASSOCIATE. Handles authentication (none or username/password).
 
@@ -94,8 +101,14 @@ type TCPHandler interface {
     HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error
 }
 
-type UDPHandler interface {
-    HandleUDP(ctx context.Context, conn net.PacketConn, srcAddr, dstAddr net.Addr) error
+// TCPPreConnector - Optional interface for accurate port scanning
+type TCPPreConnector interface {
+    PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr) (net.Conn, error)
+}
+
+// RawUDPHandler - For link-layer intercepted UDP packets
+type RawUDPHandler interface {
+    HandleRawUDP(ctx context.Context, srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) ([]byte, error)
 }
 ```
 
