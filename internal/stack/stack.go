@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/coinstash/mutiauk/internal/tun"
 	"go.uber.org/zap"
@@ -32,29 +33,42 @@ type TCPPreConnector interface {
 }
 
 // UDPHandler handles UDP packets
+// UDPHandler handles UDP packets (old interface, kept for compatibility)
 type UDPHandler interface {
 	HandleUDP(ctx context.Context, conn net.PacketConn, srcAddr, dstAddr net.Addr) error
 }
 
+// RawUDPHandler handles raw UDP packets with payload
+type RawUDPHandler interface {
+	// HandleRawUDP forwards a UDP packet and returns the response
+	// srcIP/srcPort: original source (client)
+	// dstIP/dstPort: destination to forward to
+	// payload: UDP payload data
+	// Returns response payload or error
+	HandleRawUDP(ctx context.Context, srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) ([]byte, error)
+}
+
 // Config holds stack configuration
 type Config struct {
-	MTU        int
-	IPv4Addr   net.IP
-	IPv4Mask   net.IPMask
-	IPv6Addr   net.IP
-	IPv6Mask   net.IPMask
-	TCPHandler TCPHandler
-	UDPHandler UDPHandler
-	Logger     *zap.Logger
+	MTU           int
+	IPv4Addr      net.IP
+	IPv4Mask      net.IPMask
+	IPv6Addr      net.IP
+	IPv6Mask      net.IPMask
+	TCPHandler    TCPHandler
+	UDPHandler    UDPHandler    // Old interface
+	RawUDPHandler RawUDPHandler // New interface for intercepted UDP
+	Logger        *zap.Logger
 }
 
 // Stack wraps gVisor's network stack
 type Stack struct {
-	stack      *stack.Stack
-	tunDev     tun.Device
-	linkEP     stack.LinkEndpoint
-	cfg        Config
-	logger     *zap.Logger
+	stack       *stack.Stack
+	tunDev      tun.Device
+	linkEP      stack.LinkEndpoint
+	interceptEP *interceptEndpoint
+	cfg         Config
+	logger      *zap.Logger
 }
 
 const (
@@ -85,7 +99,7 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 	// TUN devices provide raw IP packets (no ethernet header)
 	// Need to duplicate the FD because gVisor takes ownership
 	fd := tunDev.File()
-	linkEP, err := fdbased.New(&fdbased.Options{
+	baseLinkEP, err := fdbased.New(&fdbased.Options{
 		FDs:            []int{fd},
 		MTU:            uint32(cfg.MTU),
 		EthernetHeader: false, // TUN = Layer 3, no ethernet
@@ -93,10 +107,13 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create link endpoint: %w", err)
 	}
-	s.linkEP = linkEP
 
-	// Create NIC
-	if err := s.stack.CreateNIC(nicID, linkEP); err != nil {
+	// Wrap with intercept endpoint to capture UDP packets
+	s.interceptEP = newInterceptEndpoint(baseLinkEP, s, tunDev.Write, cfg.Logger)
+	s.linkEP = s.interceptEP
+
+	// Create NIC with intercept endpoint
+	if err := s.stack.CreateNIC(nicID, s.interceptEP); err != nil {
 		return nil, fmt.Errorf("failed to create NIC: %s", err)
 	}
 
@@ -148,9 +165,12 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 		},
 	})
 
-	// Enable forwarding
-	s.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
-	s.stack.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
+	// NOTE: Forwarding is intentionally DISABLED
+	// When forwarding is enabled, gVisor routes packets directly instead of
+	// passing them to transport protocol handlers (TCP/UDP forwarders).
+	// With forwarding disabled + promiscuous mode, all packets go to handlers.
+	// s.stack.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
+	// s.stack.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	return s, nil
 }
@@ -163,12 +183,9 @@ func (s *Stack) Run(ctx context.Context) error {
 	})
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
 
-	// Set up UDP forwarder
-	udpForwarder := udp.NewForwarder(s.stack, func(r *udp.ForwarderRequest) bool {
-		s.handleUDPForward(ctx, r)
-		return true // handled
-	})
-	s.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	// UDP is now handled by the intercept endpoint, not gVisor's forwarder
+	// The interceptDispatcher catches all UDP packets at the link layer
+	// and calls Stack.HandleUDPPacket directly
 
 	s.logger.Info("network stack started")
 
@@ -176,6 +193,53 @@ func (s *Stack) Run(ctx context.Context) error {
 	<-ctx.Done()
 
 	return ctx.Err()
+}
+
+// HandleUDPPacket implements UDPPacketHandler for the intercept endpoint
+func (s *Stack) HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) {
+	s.logger.Debug("UDP packet received for forwarding",
+		zap.String("src", fmt.Sprintf("%s:%d", srcIP, srcPort)),
+		zap.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+		zap.Int("payload_len", len(payload)),
+	)
+
+	if s.cfg.RawUDPHandler == nil {
+		s.logger.Debug("no RawUDPHandler configured, dropping UDP packet")
+		return
+	}
+
+	// Forward through SOCKS5 in a goroutine to not block
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		response, err := s.cfg.RawUDPHandler.HandleRawUDP(ctx, srcIP, dstIP, srcPort, dstPort, payload)
+		if err != nil {
+			s.logger.Debug("UDP forward failed",
+				zap.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+				zap.Error(err),
+			)
+			return
+		}
+
+		if len(response) == 0 {
+			return
+		}
+
+		// Build response packet: from dstIP:dstPort to srcIP:srcPort
+		responsePkt := BuildUDPResponse(dstIP, srcIP, dstPort, srcPort, response)
+
+		// Write response back to TUN
+		if _, err := s.tunDev.Write(responsePkt); err != nil {
+			s.logger.Error("failed to write UDP response to TUN",
+				zap.Error(err),
+			)
+		} else {
+			s.logger.Debug("UDP response written to TUN",
+				zap.Int("len", len(responsePkt)),
+			)
+		}
+	}()
 }
 
 // handleTCPForward handles a forwarded TCP connection
@@ -246,53 +310,6 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 	}
 }
 
-// handleUDPForward handles a forwarded UDP packet
-func (s *Stack) handleUDPForward(ctx context.Context, r *udp.ForwarderRequest) {
-	id := r.ID()
-
-	// Create endpoint
-	var wq waiter.Queue
-	ep, tcpErr := r.CreateEndpoint(&wq)
-	if tcpErr != nil {
-		s.logger.Error("failed to create UDP endpoint",
-			zap.String("src", fmt.Sprintf("%s:%d", id.RemoteAddress, id.RemotePort)),
-			zap.String("dst", fmt.Sprintf("%s:%d", id.LocalAddress, id.LocalPort)),
-			zap.String("error", tcpErr.String()),
-		)
-		return
-	}
-
-	// Convert to net.PacketConn
-	conn := gonet.NewUDPConn(&wq, ep)
-
-	srcAddr := &net.UDPAddr{
-		IP:   net.IP(id.RemoteAddress.AsSlice()),
-		Port: int(id.RemotePort),
-	}
-	dstAddr := &net.UDPAddr{
-		IP:   net.IP(id.LocalAddress.AsSlice()),
-		Port: int(id.LocalPort),
-	}
-
-	s.logger.Debug("UDP packet",
-		zap.String("src", srcAddr.String()),
-		zap.String("dst", dstAddr.String()),
-	)
-
-	if s.cfg.UDPHandler != nil {
-		go func() {
-			if err := s.cfg.UDPHandler.HandleUDP(ctx, conn, srcAddr, dstAddr); err != nil {
-				s.logger.Debug("UDP handler error",
-					zap.String("src", srcAddr.String()),
-					zap.String("dst", dstAddr.String()),
-					zap.Error(err),
-				)
-			}
-		}()
-	} else {
-		conn.Close()
-	}
-}
 
 // Close shuts down the stack
 func (s *Stack) Close() error {

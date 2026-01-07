@@ -23,13 +23,14 @@ type Server struct {
 	cfg    *config.Config
 	logger *zap.Logger
 
-	tunDev       tun.Device
-	netStack     *stack.Stack
-	natTable     *nat.Table
-	routeMgr     *route.Manager
-	socks5Client *socks5.Client
-	tcpForwarder *proxy.TCPForwarder
-	udpForwarder *proxy.UDPForwarder
+	tunDev          tun.Device
+	netStack        *stack.Stack
+	natTable        *nat.Table
+	routeMgr        *route.Manager
+	socks5Client    *socks5.Client
+	tcpForwarder    *proxy.TCPForwarder
+	udpForwarder    *proxy.UDPForwarder
+	rawUDPForwarder *proxy.RawUDPForwarder
 
 	mu       sync.RWMutex
 	running  bool
@@ -152,13 +153,15 @@ func (s *Server) initialize() error {
 	// Create forwarders
 	s.tcpForwarder = proxy.NewTCPForwarder(s.socks5Client, s.natTable, s.logger)
 	s.udpForwarder = proxy.NewUDPForwarder(s.socks5Client, s.natTable, s.logger)
+	s.rawUDPForwarder = proxy.NewRawUDPForwarder(s.socks5Client, s.logger)
 
 	// Create network stack
 	stackCfg := stack.Config{
-		MTU:         s.cfg.TUN.MTU,
-		TCPHandler:  s.tcpForwarder,
-		UDPHandler:  s.udpForwarder,
-		Logger:      s.logger,
+		MTU:           s.cfg.TUN.MTU,
+		TCPHandler:    s.tcpForwarder,
+		UDPHandler:    s.udpForwarder,
+		RawUDPHandler: s.rawUDPForwarder,
+		Logger:        s.logger,
 	}
 
 	if tunCfg.Address != nil {
