@@ -114,3 +114,11 @@ Key sections:
 - `socks5`: Proxy server, auth credentials, timeouts
 - `routes`: CIDR destinations to forward through proxy
 - `nat`: Connection table size and timeouts
+
+## Documentation
+
+Mutiauk documentation is part of the Muti Metroo documentation site:
+- **Source:** `../Muti-Metroo-v4/docs/docs/mutiauk.mdx`
+- **URL:** https://mutimetroo.com/mutiauk/
+
+Edit documentation in the Muti Metroo docs directory.

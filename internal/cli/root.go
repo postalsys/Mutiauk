@@ -48,6 +48,8 @@ func init() {
 
 	rootCmd.AddCommand(newDaemonCmd())
 	rootCmd.AddCommand(newRouteCmd())
+	rootCmd.AddCommand(newStatusCmd())
+	rootCmd.AddCommand(newServiceCmd())
 	rootCmd.AddCommand(newVersionCmd())
 }
 
