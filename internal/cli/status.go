@@ -237,7 +237,9 @@ func checkRoutesStatus(cfg *config.Config) []RouteStatus {
 	// Create map of active routes
 	activeMap := make(map[string]bool)
 	for _, r := range activeRoutes {
-		activeMap[r.Destination] = true
+		if r.Destination != nil {
+			activeMap[r.Destination.String()] = true
+		}
 	}
 
 	// Check each config route
