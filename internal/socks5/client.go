@@ -125,12 +125,11 @@ func (c *Client) UDPAssociate(ctx context.Context, localAddr *net.UDPAddr) (*UDP
 		}
 	}
 
-	// Create UDP connection to relay
-	relayUDP := relayAddr.ToUDPAddr()
-	udpConn, err := net.DialUDP("udp", nil, relayUDP)
+	// Create UDP connection to relay (use unconnected socket for flexibility)
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to connect to relay %s: %w", relayUDP.String(), err)
+		return nil, fmt.Errorf("failed to create UDP socket: %w", err)
 	}
 
 	return &UDPRelay{
@@ -401,19 +400,20 @@ func (r *UDPRelay) Send(data []byte, target *Address) error {
 	copy(packet[3:], addrBytes)
 	copy(packet[3+len(addrBytes):], data)
 
-	_, err = r.relayConn.Write(packet)
+	relayUDP := r.relayAddr.ToUDPAddr()
+	_, err = r.relayConn.WriteTo(packet, relayUDP)
 	return err
 }
 
 // Receive receives a UDP datagram from the relay
 func (r *UDPRelay) Receive(buf []byte) (int, *Address, error) {
-	n, err := r.relayConn.Read(buf)
+	n, _, err := r.relayConn.ReadFrom(buf)
 	if err != nil {
 		return 0, nil, err
 	}
 
 	if n < 4 {
-		return 0, nil, fmt.Errorf("packet too short")
+		return 0, nil, fmt.Errorf("packet too short: %d bytes", n)
 	}
 
 	// Parse header
@@ -439,6 +439,21 @@ func (r *UDPRelay) Receive(buf []byte) (int, *Address, error) {
 // LocalAddr returns the local UDP address
 func (r *UDPRelay) LocalAddr() *net.UDPAddr {
 	return r.relayConn.LocalAddr().(*net.UDPAddr)
+}
+
+// RemoteAddr returns the relay address we're sending to
+func (r *UDPRelay) RemoteAddr() string {
+	return r.relayAddr.String()
+}
+
+// RelayUDPAddr returns the relay address as *net.UDPAddr
+func (r *UDPRelay) RelayUDPAddr() *net.UDPAddr {
+	return r.relayAddr.ToUDPAddr()
+}
+
+// SetReadDeadline sets the read deadline on the relay connection
+func (r *UDPRelay) SetReadDeadline(t time.Time) error {
+	return r.relayConn.SetReadDeadline(t)
 }
 
 // Close closes the UDP relay

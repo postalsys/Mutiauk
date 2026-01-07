@@ -107,6 +107,7 @@ func (f *UDPForwarder) HandleUDP(ctx context.Context, conn net.PacketConn, srcAd
 		zap.String("src", srcAddr.String()),
 		zap.String("dst", dstAddr.String()),
 		zap.String("relay_local", relay.LocalAddr().String()),
+		zap.String("relay_remote", relay.RemoteAddr()),
 	)
 
 	// Forward packets bidirectionally
@@ -126,7 +127,9 @@ func (f *UDPForwarder) getOrCreateRelay(ctx context.Context, client *socks5.Clie
 	}
 
 	// Create new relay
-	relay, err := client.UDPAssociate(ctx, localAddr)
+	// Pass nil for localAddr so SOCKS5 accepts UDP from any source
+	// (the actual source will be our dynamically-bound UDP socket, not the TUN address)
+	relay, err := client.UDPAssociate(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -171,16 +174,26 @@ func (f *UDPForwarder) relay(ctx context.Context, local net.PacketConn, relay *s
 			}
 
 			local.SetReadDeadline(time.Now().Add(30 * time.Second))
-			n, _, err := local.ReadFrom(buf)
+			n, from, err := local.ReadFrom(buf)
 			if err != nil {
+				f.logger.Debug("UDP read from local failed", zap.Error(err))
 				errCh <- err
 				return
 			}
 
+			f.logger.Debug("UDP sending to relay",
+				zap.Int("bytes", n),
+				zap.String("from", from.String()),
+				zap.String("target", target.String()),
+				zap.String("data_hex", fmt.Sprintf("%x", buf[:min(n, 20)])),
+			)
+
 			if err := relay.Send(buf[:n], target); err != nil {
+				f.logger.Debug("UDP send to relay failed", zap.Error(err))
 				errCh <- err
 				return
 			}
+			f.logger.Debug("UDP sent to relay successfully", zap.Int("bytes", n))
 		}
 	}()
 
@@ -195,11 +208,17 @@ func (f *UDPForwarder) relay(ctx context.Context, local net.PacketConn, relay *s
 			default:
 			}
 
+			relay.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, remoteAddr, err := relay.Receive(buf)
 			if err != nil {
+				f.logger.Debug("UDP receive from relay failed", zap.Error(err))
 				errCh <- err
 				return
 			}
+			f.logger.Debug("UDP received from relay",
+				zap.Int("bytes", n),
+				zap.String("remote", remoteAddr.String()),
+			)
 
 			// Convert remote address to UDP address
 			var udpAddr *net.UDPAddr
