@@ -46,6 +46,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "/etc/mutiauk/config.yaml", "config file path")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 
+	rootCmd.AddCommand(newSetupCmd())
 	rootCmd.AddCommand(newDaemonCmd())
 	rootCmd.AddCommand(newRouteCmd())
 	rootCmd.AddCommand(newStatusCmd())
