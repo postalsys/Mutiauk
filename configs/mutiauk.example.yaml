@@ -1,0 +1,71 @@
+# Mutiauk Configuration Example
+# Copy this file to /etc/mutiauk/config.yaml and customize
+
+daemon:
+  # PID file location
+  pid_file: /var/run/mutiauk.pid
+  # Unix socket for CLI communication (future use)
+  socket_path: /var/run/mutiauk.sock
+  # Health check HTTP port (0 to disable)
+  health_port: 0
+
+tun:
+  # TUN interface name
+  name: tun0
+  # Maximum transmission unit
+  mtu: 1400
+  # IPv4 address with CIDR notation
+  address: 10.200.200.1/24
+  # IPv6 address with CIDR notation (optional)
+  address6: fd00:200::1/64
+
+socks5:
+  # SOCKS5 proxy server address
+  # For Docker on Mac: host.docker.internal:1080
+  # For local testing: 127.0.0.1:1080
+  server: 127.0.0.1:1080
+  # Username for authentication (leave empty for no auth)
+  username: ""
+  # Password for authentication (leave empty for no auth)
+  password: ""
+  # Connection timeout
+  timeout: 30s
+  # TCP keepalive interval
+  keepalive: 60s
+
+# Routes to forward through the SOCKS5 proxy
+routes:
+  # Example: Internal network
+  - destination: 10.0.0.0/8
+    comment: "Internal network"
+    enabled: true
+
+  # Example: Private network
+  - destination: 192.168.0.0/16
+    comment: "Private network"
+    enabled: true
+
+  # Example: Specific target
+  # - destination: 203.0.113.0/24
+  #   comment: "Target network"
+  #   enabled: true
+
+# NAT table configuration
+nat:
+  # Maximum number of tracked connections
+  table_size: 65536
+  # TCP connection timeout
+  tcp_timeout: 1h
+  # UDP connection timeout
+  udp_timeout: 5m
+  # Garbage collection interval
+  gc_interval: 1m
+
+# Logging configuration
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+  # Output format: json or console
+  format: json
+  # Log output: stdout, stderr, or file path
+  output: stdout

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # SOCKS5 proxy server for testing
+  socks5:
+    image: serjs/go-socks5-proxy
+    ports:
+      - "1080:1080"
+    restart: unless-stopped
+
+  # Kali Linux container for running mutiauk
+  kali:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    depends_on:
+      - socks5
+    volumes:
+      - ../configs:/etc/mutiauk:ro
+      - ../bin:/app/bin:ro
+    environment:
+      - SOCKS5_SERVER=socks5:1080
+    command: ["/app/bin/mutiauk-linux-amd64", "daemon", "start", "-c", "/etc/mutiauk/test-config.yaml", "-v"]
+    stdin_open: true
+    tty: true
+
+  # Target server for testing connectivity
+  target:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
