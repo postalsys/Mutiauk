@@ -1,5 +1,6 @@
 # Binaries
 bin/
+build/
 mutiauk
 *.exe
 *.exe~
@@ -32,6 +33,7 @@ Thumbs.db
 # Local config (keep example)
 config.yaml
 !configs/*.yaml
+configs/test-*.yaml
 
 # PID files
 *.pid
