@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coinstash/mutiauk/internal/socks5"
+	"github.com/postalsys/mutiauk/internal/socks5"
 	"go.uber.org/zap"
 )
 

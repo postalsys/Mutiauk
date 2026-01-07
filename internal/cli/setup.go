@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/coinstash/mutiauk/internal/wizard"
+	"github.com/postalsys/mutiauk/internal/wizard"
 	"github.com/spf13/cobra"
 )
 

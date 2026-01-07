@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/coinstash/mutiauk/internal/service"
+	"github.com/postalsys/mutiauk/internal/service"
 	"github.com/spf13/cobra"
 )
 

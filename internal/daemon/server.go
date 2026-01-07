@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/coinstash/mutiauk/internal/config"
-	"github.com/coinstash/mutiauk/internal/nat"
-	"github.com/coinstash/mutiauk/internal/proxy"
-	"github.com/coinstash/mutiauk/internal/route"
-	"github.com/coinstash/mutiauk/internal/socks5"
-	"github.com/coinstash/mutiauk/internal/stack"
-	"github.com/coinstash/mutiauk/internal/tun"
+	"github.com/postalsys/mutiauk/internal/config"
+	"github.com/postalsys/mutiauk/internal/nat"
+	"github.com/postalsys/mutiauk/internal/proxy"
+	"github.com/postalsys/mutiauk/internal/route"
+	"github.com/postalsys/mutiauk/internal/socks5"
+	"github.com/postalsys/mutiauk/internal/stack"
+	"github.com/postalsys/mutiauk/internal/tun"
 	"go.uber.org/zap"
 )
 

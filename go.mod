@@ -1,4 +1,4 @@
-module github.com/coinstash/mutiauk
+module github.com/postalsys/mutiauk
 
 go 1.25.5
 

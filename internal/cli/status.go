@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coinstash/mutiauk/internal/config"
-	"github.com/coinstash/mutiauk/internal/daemon"
-	"github.com/coinstash/mutiauk/internal/route"
-	"github.com/coinstash/mutiauk/internal/socks5"
+	"github.com/postalsys/mutiauk/internal/config"
+	"github.com/postalsys/mutiauk/internal/daemon"
+	"github.com/postalsys/mutiauk/internal/route"
+	"github.com/postalsys/mutiauk/internal/socks5"
 	"github.com/spf13/cobra"
 )
 

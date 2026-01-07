@@ -9,9 +9,9 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/coinstash/mutiauk/internal/config"
-	"github.com/coinstash/mutiauk/internal/service"
-	"github.com/coinstash/mutiauk/internal/wizard/prompt"
+	"github.com/postalsys/mutiauk/internal/config"
+	"github.com/postalsys/mutiauk/internal/service"
+	"github.com/postalsys/mutiauk/internal/wizard/prompt"
 	"gopkg.in/yaml.v3"
 )
 

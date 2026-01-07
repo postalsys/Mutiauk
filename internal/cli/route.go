@@ -7,8 +7,8 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/coinstash/mutiauk/internal/config"
-	"github.com/coinstash/mutiauk/internal/route"
+	"github.com/postalsys/mutiauk/internal/config"
+	"github.com/postalsys/mutiauk/internal/route"
 	"github.com/spf13/cobra"
 )
 

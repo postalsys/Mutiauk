@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/coinstash/mutiauk/internal/config"
-	"github.com/coinstash/mutiauk/internal/daemon"
+	"github.com/postalsys/mutiauk/internal/config"
+	"github.com/postalsys/mutiauk/internal/daemon"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
