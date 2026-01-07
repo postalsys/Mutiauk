@@ -24,6 +24,13 @@ type TCPHandler interface {
 	HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error
 }
 
+// TCPPreConnector can pre-establish connections before TCP handshake completes.
+// This enables accurate port scanning by rejecting connections to unreachable
+// destinations before the TCP handshake is completed.
+type TCPPreConnector interface {
+	PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr) (net.Conn, error)
+}
+
 // UDPHandler handles UDP packets
 type UDPHandler interface {
 	HandleUDP(ctx context.Context, conn net.PacketConn, srcAddr, dstAddr net.Addr) error
@@ -175,7 +182,34 @@ func (s *Stack) Run(ctx context.Context) error {
 func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 	id := r.ID()
 
-	// Create endpoint
+	srcAddr := &net.TCPAddr{
+		IP:   net.IP(id.RemoteAddress.AsSlice()),
+		Port: int(id.RemotePort),
+	}
+	dstAddr := &net.TCPAddr{
+		IP:   net.IP(id.LocalAddress.AsSlice()),
+		Port: int(id.LocalPort),
+	}
+
+	// If the handler supports pre-connection, try to establish the upstream
+	// connection BEFORE completing the TCP handshake. This ensures that
+	// port scanning through the proxy is accurate - closed ports will
+	// receive RST instead of completing the handshake.
+	if preConnector, ok := s.cfg.TCPHandler.(TCPPreConnector); ok {
+		_, err := preConnector.PreConnect(ctx, srcAddr, dstAddr)
+		if err != nil {
+			s.logger.Debug("pre-connect failed, rejecting connection",
+				zap.String("src", srcAddr.String()),
+				zap.String("dst", dstAddr.String()),
+				zap.Error(err),
+			)
+			// Reject the connection with RST - this makes the port appear closed
+			r.Complete(true)
+			return
+		}
+	}
+
+	// Create endpoint (this completes the TCP handshake)
 	var wq waiter.Queue
 	ep, tcpErr := r.CreateEndpoint(&wq)
 	if tcpErr != nil {
@@ -191,15 +225,6 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 
 	// Convert to net.Conn
 	conn := gonet.NewTCPConn(&wq, ep)
-
-	srcAddr := &net.TCPAddr{
-		IP:   net.IP(id.RemoteAddress.AsSlice()),
-		Port: int(id.RemotePort),
-	}
-	dstAddr := &net.TCPAddr{
-		IP:   net.IP(id.LocalAddress.AsSlice()),
-		Port: int(id.LocalPort),
-	}
 
 	s.logger.Debug("TCP connection",
 		zap.String("src", srcAddr.String()),

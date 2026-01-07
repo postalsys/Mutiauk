@@ -21,6 +21,9 @@ type TCPForwarder struct {
 	logger   *zap.Logger
 
 	bufferSize int
+
+	// pendingConns holds pre-established SOCKS5 connections waiting for local endpoint
+	pendingConns sync.Map // key: "srcIP:srcPort->dstIP:dstPort", value: net.Conn
 }
 
 // NewTCPForwarder creates a new TCP forwarder
@@ -40,13 +43,44 @@ func (f *TCPForwarder) UpdateClient(client *socks5.Client) {
 	f.mu.Unlock()
 }
 
-// HandleTCP handles a TCP connection from the TUN interface
-func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error {
-	defer conn.Close()
-
+// PreConnect establishes the SOCKS5 connection BEFORE the TCP handshake is completed.
+// This allows us to reject connections to unreachable destinations with RST,
+// making port scanning through the proxy accurate.
+// Returns the established proxy connection or error if destination is unreachable.
+func (f *TCPForwarder) PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr) (net.Conn, error) {
 	f.mu.RLock()
 	client := f.client
 	f.mu.RUnlock()
+
+	dstTCP := dstAddr.(*net.TCPAddr)
+	targetAddr := dstTCP.String()
+
+	// Try to establish SOCKS5 connection
+	proxyConn, err := client.Connect(ctx, targetAddr)
+	if err != nil {
+		f.logger.Debug("SOCKS5 pre-connect failed",
+			zap.String("src", srcAddr.String()),
+			zap.String("dst", dstAddr.String()),
+			zap.Error(err),
+		)
+		return nil, err
+	}
+
+	// Store the connection for HandleTCP to use
+	key := fmt.Sprintf("%s->%s", srcAddr.String(), dstAddr.String())
+	f.pendingConns.Store(key, proxyConn)
+
+	f.logger.Debug("SOCKS5 pre-connect succeeded",
+		zap.String("src", srcAddr.String()),
+		zap.String("dst", dstAddr.String()),
+	)
+
+	return proxyConn, nil
+}
+
+// HandleTCP handles a TCP connection from the TUN interface
+func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error {
+	defer conn.Close()
 
 	// Parse addresses for NAT tracking
 	srcTCP := srcAddr.(*net.TCPAddr)
@@ -65,16 +99,33 @@ func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, ds
 		)
 	}
 
-	// Connect to destination via SOCKS5
-	targetAddr := dstTCP.String()
-	proxyConn, err := client.Connect(ctx, targetAddr)
-	if err != nil {
-		f.logger.Error("SOCKS5 connect failed",
+	// Check for pre-established connection from PreConnect
+	key := fmt.Sprintf("%s->%s", srcAddr.String(), dstAddr.String())
+	var proxyConn net.Conn
+
+	if pending, ok := f.pendingConns.LoadAndDelete(key); ok {
+		proxyConn = pending.(net.Conn)
+		f.logger.Debug("using pre-established SOCKS5 connection",
 			zap.String("src", srcAddr.String()),
 			zap.String("dst", dstAddr.String()),
-			zap.Error(err),
 		)
-		return fmt.Errorf("SOCKS5 connect failed: %w", err)
+	} else {
+		// Fallback: establish connection now (for backwards compatibility)
+		f.mu.RLock()
+		client := f.client
+		f.mu.RUnlock()
+
+		targetAddr := dstTCP.String()
+		var err error
+		proxyConn, err = client.Connect(ctx, targetAddr)
+		if err != nil {
+			f.logger.Error("SOCKS5 connect failed",
+				zap.String("src", srcAddr.String()),
+				zap.String("dst", dstAddr.String()),
+				zap.Error(err),
+			)
+			return fmt.Errorf("SOCKS5 connect failed: %w", err)
+		}
 	}
 	defer proxyConn.Close()
 
