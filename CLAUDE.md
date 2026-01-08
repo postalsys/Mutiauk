@@ -135,3 +135,34 @@ Mutiauk documentation is part of the Muti Metroo documentation site:
 - **URL:** https://mutimetroo.com/mutiauk/
 
 Edit documentation in the Muti Metroo docs directory.
+
+## Releasing
+
+Releases are automated via GitHub Actions using [release-please](https://github.com/googleapis/release-please).
+
+### Commit Message Format
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) format:
+
+- `feat: add new feature` - Minor version bump
+- `fix: fix a bug` - Patch version bump
+- `feat!: breaking change` or `BREAKING CHANGE:` in body - Major version bump
+- `chore:`, `docs:`, `refactor:`, `test:` - No version bump
+
+### Release Process
+
+1. Merge PRs with conventional commit messages to `master`
+2. release-please automatically creates a Release PR with:
+   - Version bump based on commit types
+   - Updated CHANGELOG.md
+3. Merge the Release PR to trigger:
+   - Git tag creation
+   - Binary builds (Linux amd64/arm64)
+   - UPX compression
+   - GitHub Release with assets and checksums
+
+### Manual Testing
+
+Test infrastructure is in the `test/` directory:
+- Start environment: `make docker-test`
+- Get shell: `make docker-shell`
