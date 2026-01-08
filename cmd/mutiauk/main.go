@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/coinstash/mutiauk/internal/cli"
+	"github.com/postalsys/mutiauk/internal/cli"
 )
 
 func main() {
