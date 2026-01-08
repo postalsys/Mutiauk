@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/postalsys/mutiauk/internal/autoroutes"
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/nat"
 	"github.com/postalsys/mutiauk/internal/proxy"
@@ -31,6 +32,11 @@ type Server struct {
 	tcpForwarder    *proxy.TCPForwarder
 	udpForwarder    *proxy.UDPForwarder
 	rawUDPForwarder *proxy.RawUDPForwarder
+
+	// Autoroutes polling
+	autoPoller   *autoroutes.Poller
+	autoRoutes   []route.Route
+	autoRoutesMu sync.RWMutex
 
 	mu       sync.RWMutex
 	running  bool
@@ -83,6 +89,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.logger.Warn("failed to apply some routes", zap.Error(err))
 	}
 
+	// Start autoroutes polling if enabled
+	if s.cfg.AutoRoutes.Enabled {
+		s.startAutoRoutes(ctx)
+	}
+
 	// Start NAT garbage collection
 	s.natTable.StartGC(ctx, nat.GCConfig{
 		Interval: s.cfg.NAT.GCInterval,
@@ -92,6 +103,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.logger.Info("daemon started",
 		zap.String("tun", s.cfg.TUN.Name),
 		zap.String("socks5", s.cfg.SOCKS5.Server),
+		zap.Bool("autoroutes", s.cfg.AutoRoutes.Enabled),
 	)
 
 	// Run the network stack (blocks until context cancelled)
@@ -200,9 +212,42 @@ func (s *Server) cleanup() {
 	}
 }
 
-// applyRoutes applies routes from configuration
-func (s *Server) applyRoutes() error {
-	var desired []route.Route
+// startAutoRoutes initializes and starts the autoroutes poller
+func (s *Server) startAutoRoutes(ctx context.Context) {
+	client := autoroutes.NewClient(
+		s.cfg.AutoRoutes.URL,
+		s.cfg.AutoRoutes.Timeout,
+		s.logger,
+	)
+	s.autoPoller = autoroutes.NewPoller(
+		client,
+		s.cfg.AutoRoutes.PollInterval,
+		s.cfg.TUN.Name,
+		s.logger,
+	)
+
+	s.logger.Info("starting autoroutes poller",
+		zap.String("url", s.cfg.AutoRoutes.URL),
+		zap.Duration("interval", s.cfg.AutoRoutes.PollInterval),
+	)
+
+	go s.autoPoller.Start(ctx, s.onAutoRoutesUpdate)
+}
+
+// onAutoRoutesUpdate is called when new autoroutes are fetched
+func (s *Server) onAutoRoutesUpdate(routes []route.Route) {
+	s.autoRoutesMu.Lock()
+	s.autoRoutes = routes
+	s.autoRoutesMu.Unlock()
+
+	if err := s.applyAllRoutes(); err != nil {
+		s.logger.Warn("failed to apply autoroutes", zap.Error(err))
+	}
+}
+
+// getConfigRoutes returns routes from configuration
+func (s *Server) getConfigRoutes() []route.Route {
+	var routes []route.Route
 
 	for _, r := range s.cfg.Routes {
 		if !r.Enabled {
@@ -218,7 +263,7 @@ func (s *Server) applyRoutes() error {
 			continue
 		}
 
-		desired = append(desired, route.Route{
+		routes = append(routes, route.Route{
 			Destination: ipNet,
 			Interface:   s.cfg.TUN.Name,
 			Comment:     r.Comment,
@@ -226,7 +271,33 @@ func (s *Server) applyRoutes() error {
 		})
 	}
 
-	return s.routeMgr.Sync(desired)
+	return routes
+}
+
+// applyRoutes applies routes from configuration only (no autoroutes)
+func (s *Server) applyRoutes() error {
+	return s.routeMgr.Sync(s.getConfigRoutes())
+}
+
+// applyAllRoutes applies both config routes and autoroutes
+func (s *Server) applyAllRoutes() error {
+	configRoutes := s.getConfigRoutes()
+
+	s.autoRoutesMu.RLock()
+	autoRoutesCopy := make([]route.Route, len(s.autoRoutes))
+	copy(autoRoutesCopy, s.autoRoutes)
+	s.autoRoutesMu.RUnlock()
+
+	// Merge routes: config routes take precedence
+	combined := autoroutes.MergeRoutes(configRoutes, autoRoutesCopy)
+
+	s.logger.Debug("applying routes",
+		zap.Int("config_routes", len(configRoutes)),
+		zap.Int("auto_routes", len(autoRoutesCopy)),
+		zap.Int("combined", len(combined)),
+	)
+
+	return s.routeMgr.Sync(combined)
 }
 
 // Reload applies a new configuration
@@ -254,9 +325,15 @@ func (s *Server) Reload(cfg *config.Config) error {
 	// Update config
 	s.cfg = cfg
 
-	// Reapply routes
-	if err := s.applyRoutes(); err != nil {
-		s.logger.Warn("failed to reapply routes", zap.Error(err))
+	// Reapply routes (includes autoroutes if enabled)
+	if s.autoPoller != nil {
+		if err := s.applyAllRoutes(); err != nil {
+			s.logger.Warn("failed to reapply routes", zap.Error(err))
+		}
+	} else {
+		if err := s.applyRoutes(); err != nil {
+			s.logger.Warn("failed to reapply routes", zap.Error(err))
+		}
 	}
 
 	return nil

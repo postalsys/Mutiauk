@@ -11,6 +11,7 @@ traffic through a SOCKS5 proxy using Google's gVisor userspace TCP/IP stack.
 - TCP and UDP forwarding support
 - Hot reload configuration via SIGHUP
 - Userspace networking (no kernel modifications)
+- Automatic route fetching from Muti Metroo API
 
 ## Requirements
 
@@ -57,8 +58,16 @@ socks5:
   server: proxy.example.com:1080
 
 routes:
-  - 192.168.0.0/16
-  - 10.0.0.0/8
+  - destination: 192.168.0.0/16
+    enabled: true
+  - destination: 10.0.0.0/8
+    enabled: true
+
+# Optional: automatic route fetching from Muti Metroo
+autoroutes:
+  enabled: true
+  url: "http://localhost:8080"
+  poll_interval: 30s
 ```
 
 ## Documentation

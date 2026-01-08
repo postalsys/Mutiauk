@@ -50,6 +50,20 @@ routes:
   #   comment: "Target network"
   #   enabled: true
 
+# Automatic route fetching from Muti Metroo
+# When enabled, Mutiauk polls the Muti Metroo API to fetch routes
+# advertised by other agents and adds them to the local routing table.
+# These routes are ephemeral and not saved to the config file.
+autoroutes:
+  # Enable automatic route fetching
+  enabled: false
+  # Muti Metroo API base URL (required when enabled)
+  url: "http://localhost:8080"
+  # Polling interval for route updates
+  poll_interval: 30s
+  # HTTP request timeout
+  timeout: 10s
+
 # NAT table configuration
 nat:
   # Maximum number of tracked connections

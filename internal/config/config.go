@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"time"
 
@@ -11,12 +12,13 @@ import (
 
 // Config is the main configuration structure
 type Config struct {
-	Daemon  DaemonConfig  `yaml:"daemon"`
-	TUN     TUNConfig     `yaml:"tun"`
-	SOCKS5  SOCKS5Config  `yaml:"socks5"`
-	Routes  []RouteConfig `yaml:"routes"`
-	NAT     NATConfig     `yaml:"nat"`
-	Logging LoggingConfig `yaml:"logging"`
+	Daemon     DaemonConfig     `yaml:"daemon"`
+	TUN        TUNConfig        `yaml:"tun"`
+	SOCKS5     SOCKS5Config     `yaml:"socks5"`
+	Routes     []RouteConfig    `yaml:"routes"`
+	AutoRoutes AutoRoutesConfig `yaml:"autoroutes"`
+	NAT        NATConfig        `yaml:"nat"`
+	Logging    LoggingConfig    `yaml:"logging"`
 }
 
 // DaemonConfig holds daemon-specific configuration
@@ -66,6 +68,14 @@ type LoggingConfig struct {
 	MaxSize    int    `yaml:"max_size"`
 	MaxBackups int    `yaml:"max_backups"`
 	MaxAge     int    `yaml:"max_age"`
+}
+
+// AutoRoutesConfig holds automatic route fetching configuration
+type AutoRoutesConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	URL          string        `yaml:"url"`           // Muti Metroo API base URL
+	PollInterval time.Duration `yaml:"poll_interval"` // Default: 30s
+	Timeout      time.Duration `yaml:"timeout"`       // HTTP request timeout, default: 10s
 }
 
 // Load reads configuration from a YAML file
@@ -138,6 +148,14 @@ func (c *Config) setDefaults() {
 		c.Logging.Format = "json"
 	}
 
+	// AutoRoutes defaults
+	if c.AutoRoutes.PollInterval == 0 {
+		c.AutoRoutes.PollInterval = 30 * time.Second
+	}
+	if c.AutoRoutes.Timeout == 0 {
+		c.AutoRoutes.Timeout = 10 * time.Second
+	}
+
 	// Set default enabled state for routes
 	for i := range c.Routes {
 		// Routes are enabled by default if not explicitly set
@@ -200,6 +218,22 @@ func (c *Config) Validate() error {
 		_, _, err := net.ParseCIDR(r.Destination)
 		if err != nil {
 			return fmt.Errorf("invalid routes[%d].destination: %w", i, err)
+		}
+	}
+
+	// Validate autoroutes
+	if c.AutoRoutes.Enabled {
+		if c.AutoRoutes.URL == "" {
+			return fmt.Errorf("autoroutes.url is required when enabled")
+		}
+		if _, err := url.Parse(c.AutoRoutes.URL); err != nil {
+			return fmt.Errorf("invalid autoroutes.url: %w", err)
+		}
+		if c.AutoRoutes.PollInterval < time.Second {
+			return fmt.Errorf("autoroutes.poll_interval must be at least 1s")
+		}
+		if c.AutoRoutes.Timeout < time.Second {
+			return fmt.Errorf("autoroutes.timeout must be at least 1s")
 		}
 	}
 
