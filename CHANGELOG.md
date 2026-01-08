@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.3...mutiauk-v0.2.4) (2026-01-08)
+
+
+### Features
+
+* add autoroutes feature for automatic route fetching from Muti Metroo API ([ee8a8cd](https://github.com/postalsys/Mutiauk/commit/ee8a8cd848394aaaa0c4d5e5bfba5bce682bfadf))
+
 ## [0.2.3](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.2...mutiauk-v0.2.3) (2026-01-08)
 
 
