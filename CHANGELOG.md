@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.2...mutiauk-v0.2.3) (2026-01-08)
+
+
+### Bug Fixes
+
+* correct import path from coinstash to postalsys ([99fee24](https://github.com/postalsys/Mutiauk/commit/99fee245cffa1bc58cee25e387005b30b4f1439b))
+
 ## [0.2.2](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.1...mutiauk-v0.2.2) (2026-01-08)
 
 
