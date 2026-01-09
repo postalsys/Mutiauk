@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.5...mutiauk-v0.2.6) (2026-01-09)
+
+
+### Features
+
+* add Unix socket API for CLI-daemon communication ([c72ee67](https://github.com/postalsys/Mutiauk/commit/c72ee67b06627c2cd979977fdb2d779eb4edbd32))
+
 ## [0.2.5](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.4...mutiauk-v0.2.5) (2026-01-09)
 
 
