@@ -260,3 +260,15 @@ func (c *Config) GetTUNIPv6() (net.IP, *net.IPNet, error) {
 func (c *Config) HasAuth() bool {
 	return c.SOCKS5.Username != "" && c.SOCKS5.Password != ""
 }
+
+// Save writes the configuration to a YAML file
+func (c *Config) Save(path string) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+	return nil
+}

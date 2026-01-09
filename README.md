@@ -12,6 +12,8 @@ traffic through a SOCKS5 proxy using Google's gVisor userspace TCP/IP stack.
 - Hot reload configuration via SIGHUP
 - Userspace networking (no kernel modifications)
 - Automatic route fetching from Muti Metroo API
+- Unix socket API for CLI-daemon communication
+- Route persistence with `--persist` flag
 
 ## Requirements
 
@@ -37,9 +39,13 @@ sudo mv mutiauk /usr/local/bin/
 # Start daemon with config file
 sudo mutiauk daemon -c /etc/mutiauk/config.yaml
 
-# Manage routes (CLI mode)
+# Check status (shows daemon info, config path, uptime)
+mutiauk status
+
+# Manage routes
 mutiauk route list
 mutiauk route add 10.0.0.0/8
+mutiauk route add 10.0.0.0/8 --persist  # Save to config file
 mutiauk route remove 10.0.0.0/8
 
 # Analyze routing for a destination

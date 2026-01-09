@@ -53,7 +53,7 @@ func newDaemonStartCmd() *cobra.Command {
 			)
 
 			// Create daemon server
-			srv, err := daemon.New(cfg, log)
+			srv, err := daemon.New(cfg, cfgFile, log)
 			if err != nil {
 				return fmt.Errorf("failed to create daemon: %w", err)
 			}

@@ -7,7 +7,9 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/postalsys/mutiauk/internal/api"
 	"github.com/postalsys/mutiauk/internal/autoroutes"
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/nat"
@@ -21,8 +23,10 @@ import (
 
 // Server is the main daemon server
 type Server struct {
-	cfg    *config.Config
-	logger *zap.Logger
+	cfg        *config.Config
+	configPath string // Path to config file we were started with
+	logger     *zap.Logger
+	startTime  time.Time
 
 	tunDev          tun.Device
 	netStack        *stack.Stack
@@ -32,6 +36,9 @@ type Server struct {
 	tcpForwarder    *proxy.TCPForwarder
 	udpForwarder    *proxy.UDPForwarder
 	rawUDPForwarder *proxy.RawUDPForwarder
+
+	// API server for CLI communication
+	apiServer *api.Server
 
 	// Autoroutes polling
 	autoPoller   *autoroutes.Poller
@@ -44,10 +51,11 @@ type Server struct {
 }
 
 // New creates a new daemon server
-func New(cfg *config.Config, logger *zap.Logger) (*Server, error) {
+func New(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, error) {
 	return &Server{
-		cfg:    cfg,
-		logger: logger,
+		cfg:        cfg,
+		configPath: configPath,
+		logger:     logger,
 	}, nil
 }
 
@@ -59,6 +67,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("server already running")
 	}
 	s.running = true
+	s.startTime = time.Now()
 	s.mu.Unlock()
 
 	defer func() {
@@ -83,6 +92,14 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 	defer s.cleanup()
+
+	// Start API server for CLI communication
+	if s.cfg.Daemon.SocketPath != "" {
+		s.apiServer = api.NewServer(s.cfg.Daemon.SocketPath, s, s.logger)
+		if err := s.apiServer.Start(ctx); err != nil {
+			s.logger.Warn("failed to start API server", zap.Error(err))
+		}
+	}
 
 	// Apply routes from config
 	if err := s.applyRoutes(); err != nil {
@@ -201,6 +218,9 @@ func (s *Server) initialize() error {
 
 // cleanup closes all components
 func (s *Server) cleanup() {
+	if s.apiServer != nil {
+		s.apiServer.Stop()
+	}
 	if s.netStack != nil {
 		s.netStack.Close()
 	}
@@ -368,4 +388,203 @@ func ReadPIDFile(path string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(string(data))
+}
+
+// StateProvider interface implementation for API server
+
+// GetStatus returns the daemon status
+func (s *Server) GetStatus() *api.StatusResult {
+	s.mu.RLock()
+	running := s.running
+	startTime := s.startTime
+	s.mu.RUnlock()
+
+	s.autoRoutesMu.RLock()
+	autoRouteCount := len(s.autoRoutes)
+	s.autoRoutesMu.RUnlock()
+
+	result := &api.StatusResult{
+		Running:      running,
+		PID:          os.Getpid(),
+		ConfigPath:   s.configPath,
+		TUNName:      s.cfg.TUN.Name,
+		TUNAddress:   s.cfg.TUN.Address,
+		SOCKS5Server: s.cfg.SOCKS5.Server,
+		SOCKS5Status: "configured",
+	}
+
+	if running {
+		result.Uptime = time.Since(startTime).Round(time.Second).String()
+	}
+
+	result.AutoRoutes.Enabled = s.cfg.AutoRoutes.Enabled
+	if s.cfg.AutoRoutes.Enabled {
+		result.AutoRoutes.URL = s.cfg.AutoRoutes.URL
+		result.AutoRoutes.Count = autoRouteCount
+	}
+
+	result.RouteCount.Config = len(s.cfg.Routes)
+	result.RouteCount.Auto = autoRouteCount
+	result.RouteCount.Total = result.RouteCount.Config + result.RouteCount.Auto
+
+	return result
+}
+
+// GetRoutes returns the list of active routes with source info
+func (s *Server) GetRoutes() []api.RouteInfo {
+	var routes []api.RouteInfo
+
+	// Config routes
+	for _, r := range s.cfg.Routes {
+		routes = append(routes, api.RouteInfo{
+			Destination: r.Destination,
+			Interface:   s.cfg.TUN.Name,
+			Comment:     r.Comment,
+			Source:      "config",
+			Enabled:     r.Enabled,
+		})
+	}
+
+	// Auto routes
+	s.autoRoutesMu.RLock()
+	for _, r := range s.autoRoutes {
+		routes = append(routes, api.RouteInfo{
+			Destination: r.Destination.String(),
+			Interface:   s.cfg.TUN.Name,
+			Comment:     r.Comment,
+			Source:      "auto",
+			Enabled:     true,
+		})
+	}
+	s.autoRoutesMu.RUnlock()
+
+	return routes
+}
+
+// AddRoute adds a route and optionally persists to config
+func (s *Server) AddRoute(dest, comment string, persist bool) error {
+	_, ipNet, err := net.ParseCIDR(dest)
+	if err != nil {
+		return fmt.Errorf("invalid CIDR: %w", err)
+	}
+
+	r := route.Route{
+		Destination: ipNet,
+		Interface:   s.cfg.TUN.Name,
+		Comment:     comment,
+		Enabled:     true,
+	}
+
+	if err := s.routeMgr.Add(r); err != nil {
+		return fmt.Errorf("failed to add route: %w", err)
+	}
+
+	if persist {
+		s.cfg.Routes = append(s.cfg.Routes, config.RouteConfig{
+			Destination: dest,
+			Comment:     comment,
+			Enabled:     true,
+		})
+		if err := s.cfg.Save(s.configPath); err != nil {
+			return fmt.Errorf("route added but failed to save config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// RemoveRoute removes a route and optionally persists to config
+func (s *Server) RemoveRoute(dest string, persist bool) error {
+	_, ipNet, err := net.ParseCIDR(dest)
+	if err != nil {
+		return fmt.Errorf("invalid CIDR: %w", err)
+	}
+
+	r := route.Route{
+		Destination: ipNet,
+	}
+
+	if err := s.routeMgr.Remove(r); err != nil {
+		return fmt.Errorf("failed to remove route: %w", err)
+	}
+
+	if persist {
+		// Remove from config
+		for i, rc := range s.cfg.Routes {
+			if rc.Destination == dest {
+				s.cfg.Routes = append(s.cfg.Routes[:i], s.cfg.Routes[i+1:]...)
+				break
+			}
+		}
+		if err := s.cfg.Save(s.configPath); err != nil {
+			return fmt.Errorf("route removed but failed to save config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// TraceRoute traces routing for a destination
+func (s *Server) TraceRoute(dest string) (*api.RouteTraceResult, error) {
+	lookup, err := route.ResolveAndLookup(dest, s.cfg.TUN.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &api.RouteTraceResult{
+		Destination:  dest,
+		ResolvedIP:   lookup.ResolvedIP.String(),
+		MatchedRoute: lookup.MatchedRoute.String(),
+		Interface:    lookup.Interface,
+		IsMutiauk:    lookup.IsMutiauk,
+	}
+
+	if lookup.Gateway != nil && !lookup.Gateway.IsUnspecified() {
+		result.Gateway = lookup.Gateway.String()
+	}
+
+	// If routed through Mutiauk and autoroutes enabled, lookup mesh path
+	if lookup.IsMutiauk && s.cfg.AutoRoutes.URL != "" {
+		client := autoroutes.NewClient(
+			s.cfg.AutoRoutes.URL,
+			s.cfg.AutoRoutes.Timeout,
+			s.logger,
+		)
+
+		path, err := client.LookupPath(context.Background(), lookup.ResolvedIP)
+		if err != nil {
+			s.logger.Debug("failed to lookup mesh path", zap.Error(err))
+		} else if path != nil {
+			result.MeshPath = path.PathDisplay
+			result.Origin = path.Origin
+			result.OriginID = path.OriginID
+			result.HopCount = path.HopCount
+		}
+	}
+
+	return result, nil
+}
+
+// GetConfigPath returns the config file path
+func (s *Server) GetConfigPath() string {
+	return s.configPath
+}
+
+// formatUptime formats duration as human-readable string
+func formatUptime(d time.Duration) string {
+	d = d.Round(time.Second)
+
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	sec := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, sec)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, sec)
+	}
+	return fmt.Sprintf("%ds", sec)
 }

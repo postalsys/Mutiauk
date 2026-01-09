@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/postalsys/mutiauk/internal/api"
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/daemon"
 	"github.com/postalsys/mutiauk/internal/route"
@@ -30,9 +31,12 @@ type StatusResult struct {
 
 // DaemonStatus holds daemon process status
 type DaemonStatus struct {
-	Running bool   `json:"running"`
-	PID     int    `json:"pid,omitempty"`
-	Message string `json:"message"`
+	Running        bool   `json:"running"`
+	PID            int    `json:"pid,omitempty"`
+	Message        string `json:"message"`
+	ConfigPath     string `json:"config_path,omitempty"`
+	Uptime         string `json:"uptime,omitempty"`
+	ConfigMismatch bool   `json:"config_mismatch,omitempty"`
 }
 
 // TUNStatus holds TUN interface status
@@ -125,6 +129,26 @@ func checkDaemonStatus(cfg *config.Config) DaemonStatus {
 		Message: "not running",
 	}
 
+	// Try to connect via Unix socket first
+	client := api.NewClient(cfg.Daemon.SocketPath)
+	if client.IsRunning() {
+		apiStatus, err := client.Status()
+		if err == nil {
+			status.Running = true
+			status.PID = apiStatus.PID
+			status.ConfigPath = apiStatus.ConfigPath
+			status.Uptime = apiStatus.Uptime
+			status.Message = fmt.Sprintf("running (PID %d)", apiStatus.PID)
+
+			// Check if CLI config matches daemon config
+			if apiStatus.ConfigPath != cfgFile {
+				status.ConfigMismatch = true
+			}
+			return status
+		}
+	}
+
+	// Fallback to PID file check
 	pid, err := daemon.ReadPIDFile(cfg.Daemon.PIDFile)
 	if err != nil {
 		return status
@@ -325,7 +349,14 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 	fmt.Println()
 
 	// Daemon status
-	fmt.Printf("Daemon:        %s\n", result.Daemon.Message)
+	daemonInfo := result.Daemon.Message
+	if result.Daemon.Uptime != "" {
+		daemonInfo += fmt.Sprintf(", uptime %s", result.Daemon.Uptime)
+	}
+	fmt.Printf("Daemon:        %s\n", daemonInfo)
+	if result.Daemon.ConfigPath != "" {
+		fmt.Printf("Config:        %s\n", result.Daemon.ConfigPath)
+	}
 
 	// TUN interface
 	tunInfo := result.TUN.Name
@@ -394,6 +425,10 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 
 	// Summary
 	fmt.Println()
+	if result.Daemon.ConfigMismatch {
+		fmt.Printf("Warning: CLI config (%s) differs from daemon config (%s)\n", cfgFile, result.Daemon.ConfigPath)
+		fmt.Println("         Commands may behave unexpectedly. Consider using: -c " + result.Daemon.ConfigPath)
+	}
 	if !result.Daemon.Running {
 		fmt.Println("Note: Daemon is not running. Start with: sudo mutiauk daemon start")
 	} else if !result.Connectivity.SOCKS5Reachable {
