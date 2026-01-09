@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -12,10 +13,13 @@ import (
 
 // DashboardRoute represents a route from the Muti Metroo API
 type DashboardRoute struct {
-	Network   string `json:"network"`
-	RouteType string `json:"route_type"` // "cidr" or "domain"
-	Origin    string `json:"origin"`
-	OriginID  string `json:"origin_id"`
+	Network     string   `json:"network"`
+	RouteType   string   `json:"route_type"` // "cidr" or "domain"
+	Origin      string   `json:"origin"`
+	OriginID    string   `json:"origin_id"`
+	HopCount    int      `json:"hop_count"`
+	PathDisplay []string `json:"path_display"`
+	PathIDs     []string `json:"path_ids"`
 }
 
 // DashboardResponse mirrors the Muti Metroo /api/dashboard response
@@ -69,4 +73,60 @@ func (c *Client) FetchDashboard(ctx context.Context) (*DashboardResponse, error)
 	}
 
 	return &dashboard, nil
+}
+
+// PathResult contains mesh path information for a route
+type PathResult struct {
+	Network     string
+	Origin      string
+	OriginID    string
+	PathDisplay []string
+	PathIDs     []string
+	HopCount    int
+}
+
+// LookupPath finds the mesh path for an IP using longest-prefix match
+func (c *Client) LookupPath(ctx context.Context, ip net.IP) (*PathResult, error) {
+	dashboard, err := c.FetchDashboard(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var bestMatch *DashboardRoute
+	var bestPrefixLen int = -1
+
+	for i := range dashboard.Routes {
+		r := &dashboard.Routes[i]
+		if r.RouteType != "cidr" {
+			continue
+		}
+
+		_, ipNet, err := net.ParseCIDR(r.Network)
+		if err != nil {
+			continue
+		}
+
+		if !ipNet.Contains(ip) {
+			continue
+		}
+
+		ones, _ := ipNet.Mask.Size()
+		if ones > bestPrefixLen {
+			bestPrefixLen = ones
+			bestMatch = r
+		}
+	}
+
+	if bestMatch == nil {
+		return nil, nil // No matching route in mesh
+	}
+
+	return &PathResult{
+		Network:     bestMatch.Network,
+		Origin:      bestMatch.Origin,
+		OriginID:    bestMatch.OriginID,
+		PathDisplay: bestMatch.PathDisplay,
+		PathIDs:     bestMatch.PathIDs,
+		HopCount:    bestMatch.HopCount,
+	}, nil
 }

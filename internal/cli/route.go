@@ -24,6 +24,7 @@ func newRouteCmd() *cobra.Command {
 	cmd.AddCommand(newRoutePlanCmd())
 	cmd.AddCommand(newRouteApplyCmd())
 	cmd.AddCommand(newRouteCheckCmd())
+	cmd.AddCommand(newRouteTraceCmd())
 
 	return cmd
 }
