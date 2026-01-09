@@ -286,3 +286,98 @@ func TestRouteContains(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractOriginID(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		want    string
+	}{
+		{
+			name:    "valid autoroute comment",
+			comment: "autoroute:abc123",
+			want:    "abc123",
+		},
+		{
+			name:    "valid autoroute with long ID",
+			comment: "autoroute:agent-12345-abcdef",
+			want:    "agent-12345-abcdef",
+		},
+		{
+			name:    "empty origin ID",
+			comment: "autoroute:",
+			want:    "",
+		},
+		{
+			name:    "non-autoroute comment",
+			comment: "manual route",
+			want:    "",
+		},
+		{
+			name:    "empty comment",
+			comment: "",
+			want:    "",
+		},
+		{
+			name:    "partial prefix",
+			comment: "autoroute",
+			want:    "",
+		},
+		{
+			name:    "similar but different prefix",
+			comment: "autoroutes:abc123",
+			want:    "",
+		},
+		{
+			name:    "prefix in middle of string",
+			comment: "some autoroute:abc123",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := route.Route{Comment: tt.comment}
+			result := extractOriginID(r)
+			if result != tt.want {
+				t.Errorf("extractOriginID(%q) = %q, want %q", tt.comment, result, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeRoutes_NilDestination(t *testing.T) {
+	// Test that routes with nil destinations are handled gracefully
+	configRoutes := []route.Route{
+		{Destination: mustParseCIDR("10.10.0.0/16"), Interface: "tun0"},
+	}
+	autoRoutes := []route.Route{
+		{Destination: nil, Interface: "tun0", Comment: "invalid"},
+		{Destination: mustParseCIDR("10.11.0.0/16"), Interface: "tun0"},
+	}
+
+	result := MergeRoutes(configRoutes, autoRoutes)
+
+	// Should have config route + valid auto route (nil destination skipped)
+	if len(result) != 2 {
+		t.Errorf("expected 2 routes, got %d", len(result))
+	}
+}
+
+func TestMergeRoutes_NilConfigDestination(t *testing.T) {
+	// Test that config routes with nil destinations don't panic
+	configRoutes := []route.Route{
+		{Destination: nil, Interface: "tun0", Comment: "invalid config"},
+		{Destination: mustParseCIDR("10.10.0.0/16"), Interface: "tun0"},
+	}
+	autoRoutes := []route.Route{
+		{Destination: mustParseCIDR("10.11.0.0/16"), Interface: "tun0"},
+	}
+
+	result := MergeRoutes(configRoutes, autoRoutes)
+
+	// Should have both config routes + auto route
+	if len(result) != 3 {
+		t.Errorf("expected 3 routes, got %d", len(result))
+	}
+}
