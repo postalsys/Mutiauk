@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.4...mutiauk-v0.2.5) (2026-01-09)
+
+
+### Features
+
+* add route trace command for routing analysis ([1a5531a](https://github.com/postalsys/Mutiauk/commit/1a5531ae7bb4dfc3f71362efbdc3bc095eb34a09))
+
 ## [0.2.4](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.3...mutiauk-v0.2.4) (2026-01-08)
 
 
