@@ -38,9 +38,13 @@ sudo mv mutiauk /usr/local/bin/
 sudo mutiauk daemon -c /etc/mutiauk/config.yaml
 
 # Manage routes (CLI mode)
-mutiauk routes list
-mutiauk routes add 10.0.0.0/8
-mutiauk routes remove 10.0.0.0/8
+mutiauk route list
+mutiauk route add 10.0.0.0/8
+mutiauk route remove 10.0.0.0/8
+
+# Analyze routing for a destination
+mutiauk route trace 10.10.5.100
+mutiauk route trace internal.corp.local --json
 ```
 
 ## Configuration
