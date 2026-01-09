@@ -24,17 +24,17 @@ COPY configs/ /etc/mutiauk/
 # Create test config that uses Docker networking
 RUN echo 'daemon:\n\
   pid_file: /var/run/mutiauk.pid\n\
+  socket_path: /var/run/mutiauk.sock\n\
 tun:\n\
   name: tun0\n\
   mtu: 1400\n\
   address: 10.200.200.1/24\n\
-  address6: fd00:200::1/64\n\
 socks5:\n\
   server: socks5:1080\n\
   timeout: 30s\n\
 routes:\n\
-  - destination: 172.16.0.0/12\n\
-    comment: "Docker networks"\n\
+  - destination: 172.31.0.100/32\n\
+    comment: "Target nginx container"\n\
     enabled: true\n\
 nat:\n\
   tcp_timeout: 1h\n\
