@@ -2,12 +2,16 @@
 package wizard
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/service"
@@ -52,14 +56,23 @@ func (w *Wizard) Run() (string, error) {
 		return "", err
 	}
 
-	// Step 4: Routes configuration
-	routes, err := w.askRoutes()
+	// Step 4: Autoroutes configuration
+	autoRoutesConfig, useAutoRoutes, err := w.askAutoRoutes()
 	if err != nil {
 		return "", err
 	}
 
+	// Step 5: Manual routes configuration (only if not using autoroutes)
+	var routes []config.RouteConfig
+	if !useAutoRoutes {
+		routes, err = w.askRoutes()
+		if err != nil {
+			return "", err
+		}
+	}
+
 	// Build and write config
-	cfg := w.buildConfig(tunConfig, socks5Config, routes)
+	cfg := w.buildConfig(tunConfig, socks5Config, autoRoutesConfig, routes)
 	if err := w.writeConfig(cfg, configPath); err != nil {
 		return "", err
 	}
@@ -69,7 +82,7 @@ func (w *Wizard) Run() (string, error) {
 	// Print summary
 	w.printSummary(cfg, configPath)
 
-	// Step 5: Service installation
+	// Step 6: Service installation
 	if err := w.askServiceInstall(configPath); err != nil {
 		return "", err
 	}
@@ -255,6 +268,135 @@ func (w *Wizard) askSOCKS5Config() (config.SOCKS5Config, error) {
 	return cfg, nil
 }
 
+func (w *Wizard) askAutoRoutes() (config.AutoRoutesConfig, bool, error) {
+	prompt.PrintHeader("Automatic Routes", "Fetch routes automatically from Muti Metroo dashboard.")
+
+	cfg := config.AutoRoutesConfig{}
+
+	fmt.Println("Autoroutes automatically fetches and maintains routes from a Muti Metroo")
+	fmt.Println("dashboard. This eliminates the need to manually manage routes.")
+	fmt.Println()
+
+	useAutoRoutes, err := prompt.Confirm("Use automatic routes from Muti Metroo dashboard?", false)
+	if err != nil {
+		return cfg, false, err
+	}
+
+	if !useAutoRoutes {
+		return cfg, false, nil
+	}
+
+	// Get dashboard URL
+	dashboardURL, err := prompt.ReadLineValidated("Muti Metroo dashboard URL", "http://localhost:3000", func(s string) error {
+		if s == "" {
+			return fmt.Errorf("URL is required")
+		}
+		u, err := url.Parse(s)
+		if err != nil {
+			return fmt.Errorf("invalid URL: %v", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("URL must use http or https scheme")
+		}
+		if u.Host == "" {
+			return fmt.Errorf("URL must include host")
+		}
+		return nil
+	})
+	if err != nil {
+		return cfg, false, err
+	}
+
+	// Remove trailing slash
+	dashboardURL = strings.TrimSuffix(dashboardURL, "/")
+
+	// Verify the dashboard API is accessible
+	fmt.Println()
+	prompt.PrintInfo("Verifying dashboard API...")
+
+	apiErr := w.verifyDashboardAPI(dashboardURL)
+	if apiErr != nil {
+		prompt.PrintError(fmt.Sprintf("Failed to connect to dashboard API: %v", apiErr))
+		fmt.Println()
+		fmt.Println("The dashboard API at " + dashboardURL + "/api/dashboard is not responding.")
+		fmt.Println("Possible causes:")
+		fmt.Println("  - Dashboard server is not running")
+		fmt.Println("  - Incorrect URL")
+		fmt.Println("  - Network connectivity issues")
+		fmt.Println("  - Firewall blocking the connection")
+		fmt.Println()
+
+		// Offer options
+		retryChoice, err := prompt.Select("What would you like to do?", []string{
+			"Retry connection",
+			"Continue anyway (routes will be fetched when daemon starts)",
+			"Skip autoroutes and configure manual routes",
+		}, 0)
+		if err != nil {
+			return cfg, false, err
+		}
+
+		switch retryChoice {
+		case 0: // Retry
+			return w.askAutoRoutes()
+		case 1: // Continue anyway
+			prompt.PrintWarning("Proceeding without verification. Ensure the dashboard is running before starting the daemon.")
+		case 2: // Skip autoroutes
+			return cfg, false, nil
+		}
+	} else {
+		prompt.PrintSuccess("Dashboard API is accessible")
+	}
+
+	// Ask for poll interval
+	pollIntervalStr, err := prompt.ReadLineValidated("Poll interval", "30s", func(s string) error {
+		_, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration (use format like 30s, 1m, 5m)")
+		}
+		return nil
+	})
+	if err != nil {
+		return cfg, false, err
+	}
+
+	pollInterval, _ := time.ParseDuration(pollIntervalStr)
+
+	cfg.Enabled = true
+	cfg.URL = dashboardURL
+	cfg.PollInterval = pollInterval
+	cfg.Timeout = 10 * time.Second
+
+	return cfg, true, nil
+}
+
+// verifyDashboardAPI checks if the dashboard API is accessible
+func (w *Wizard) verifyDashboardAPI(baseURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	apiURL := baseURL + "/api/dashboard"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func (w *Wizard) askRoutes() ([]config.RouteConfig, error) {
 	prompt.PrintHeader("Routes", "Configure which traffic to route through the SOCKS5 proxy.")
 
@@ -333,15 +475,16 @@ func (w *Wizard) askRoutes() ([]config.RouteConfig, error) {
 	return routes, nil
 }
 
-func (w *Wizard) buildConfig(tunCfg config.TUNConfig, socks5Cfg config.SOCKS5Config, routes []config.RouteConfig) *config.Config {
+func (w *Wizard) buildConfig(tunCfg config.TUNConfig, socks5Cfg config.SOCKS5Config, autoRoutesCfg config.AutoRoutesConfig, routes []config.RouteConfig) *config.Config {
 	cfg := &config.Config{
 		Daemon: config.DaemonConfig{
 			PIDFile:    "/var/run/mutiauk.pid",
 			SocketPath: "/var/run/mutiauk.sock",
 		},
-		TUN:    tunCfg,
-		SOCKS5: socks5Cfg,
-		Routes: routes,
+		TUN:        tunCfg,
+		SOCKS5:     socks5Cfg,
+		AutoRoutes: autoRoutesCfg,
+		Routes:     routes,
 		NAT: config.NATConfig{
 			TableSize:  65536,
 			TCPTimeout: 3600000000000,  // 1 hour in nanoseconds
@@ -414,13 +557,23 @@ func (w *Wizard) printSummary(cfg *config.Config, configPath string) {
 	if cfg.SOCKS5.Username != "" {
 		fmt.Printf("  SOCKS5 auth:     yes (user: %s)\n", cfg.SOCKS5.Username)
 	}
-	fmt.Printf("  Routes:          %d configured\n", len(cfg.Routes))
-	for _, r := range cfg.Routes {
-		comment := ""
-		if r.Comment != "" {
-			comment = fmt.Sprintf(" (%s)", r.Comment)
+
+	// Show autoroutes if enabled
+	if cfg.AutoRoutes.Enabled {
+		fmt.Printf("  Autoroutes:      enabled\n")
+		fmt.Printf("                   URL: %s\n", cfg.AutoRoutes.URL)
+		fmt.Printf("                   Poll interval: %s\n", cfg.AutoRoutes.PollInterval)
+	} else if len(cfg.Routes) > 0 {
+		fmt.Printf("  Routes:          %d configured\n", len(cfg.Routes))
+		for _, r := range cfg.Routes {
+			comment := ""
+			if r.Comment != "" {
+				comment = fmt.Sprintf(" (%s)", r.Comment)
+			}
+			fmt.Printf("                   - %s%s\n", r.Destination, comment)
 		}
-		fmt.Printf("                   - %s%s\n", r.Destination, comment)
+	} else {
+		fmt.Printf("  Routes:          none configured\n")
 	}
 
 	fmt.Println()

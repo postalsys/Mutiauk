@@ -17,8 +17,9 @@ The wizard will guide you through:
   1. Choosing a configuration file location
   2. Configuring the TUN interface (name, address, MTU)
   3. Setting up the SOCKS5 proxy connection
-  4. Defining routes to forward through the proxy
-  5. Optionally installing Mutiauk as a system service
+  4. Configuring autoroutes from Muti Metroo dashboard (optional)
+  5. Defining manual routes if not using autoroutes
+  6. Optionally installing Mutiauk as a system service
 
 Example:
   sudo mutiauk setup`,
