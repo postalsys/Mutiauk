@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.8](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.7...mutiauk-v0.2.8) (2026-01-10)
+
+
+### Bug Fixes
+
+* trigger release ([4b1fe8c](https://github.com/postalsys/Mutiauk/commit/4b1fe8c888eb492794646de4808ed30e6ee4906a))
+
 ## [0.2.7](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.6...mutiauk-v0.2.7) (2026-01-10)
 
 
