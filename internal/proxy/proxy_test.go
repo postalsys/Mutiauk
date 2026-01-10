@@ -694,3 +694,345 @@ func TestClientHolder_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- Additional RelayPool Tests ---
+
+func TestNewRelayPool(t *testing.T) {
+	logger := zap.NewNop()
+	ttl := 5 * time.Minute
+
+	pool := NewRelayPool(ttl, logger)
+	defer pool.Close()
+
+	if pool == nil {
+		t.Fatal("NewRelayPool returned nil")
+	}
+	if pool.entries == nil {
+		t.Error("entries map not initialized")
+	}
+	if pool.ttl != ttl {
+		t.Errorf("ttl = %v, want %v", pool.ttl, ttl)
+	}
+	if pool.logger != logger {
+		t.Error("logger not set correctly")
+	}
+	if pool.stopCh == nil {
+		t.Error("stopCh not initialized")
+	}
+}
+
+func TestRelayPool_GetOrCreate_Error(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	expectedErr := net.ErrClosed
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, expectedErr
+	}
+
+	ctx := context.Background()
+	relay, err := pool.GetOrCreate(ctx, "error-key", createFunc)
+
+	if err != expectedErr {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+	if relay != nil {
+		t.Error("expected nil relay on error")
+	}
+
+	// Verify entry was not stored
+	pool.mu.Lock()
+	_, exists := pool.entries["error-key"]
+	pool.mu.Unlock()
+	if exists {
+		t.Error("entry should not be stored on creation error")
+	}
+}
+
+func TestRelayPool_GetOrCreate_Concurrent(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	var createCount int
+	var mu sync.Mutex
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		mu.Lock()
+		createCount++
+		mu.Unlock()
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+
+	// Concurrent access to same key
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = pool.GetOrCreate(ctx, "shared-key", createFunc)
+		}()
+	}
+	wg.Wait()
+
+	// Due to mutex, only one create should succeed
+	mu.Lock()
+	count := createCount
+	mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected 1 create call, got %d", count)
+	}
+}
+
+func TestRelayPool_GetOrCreate_UpdatesLastUsed(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	_, _ = pool.GetOrCreate(ctx, "test-key", createFunc)
+
+	// Get initial lastUsed time
+	pool.mu.Lock()
+	initialTime := pool.entries["test-key"].lastUsed
+	pool.mu.Unlock()
+
+	// Wait a bit and access again
+	time.Sleep(10 * time.Millisecond)
+	_, _ = pool.GetOrCreate(ctx, "test-key", createFunc)
+
+	// Verify lastUsed was updated
+	pool.mu.Lock()
+	updatedTime := pool.entries["test-key"].lastUsed
+	pool.mu.Unlock()
+
+	if !updatedTime.After(initialTime) {
+		t.Error("lastUsed time should be updated on access")
+	}
+}
+
+func TestRelayPool_Cleanup(t *testing.T) {
+	logger := zap.NewNop()
+	// Use very short TTL for testing
+	pool := NewRelayPool(10*time.Millisecond, logger)
+	defer pool.Close()
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	_, _ = pool.GetOrCreate(ctx, "expire-key", createFunc)
+
+	// Verify entry exists
+	pool.mu.Lock()
+	_, exists := pool.entries["expire-key"]
+	pool.mu.Unlock()
+	if !exists {
+		t.Fatal("entry should exist initially")
+	}
+
+	// Wait for TTL to expire
+	time.Sleep(20 * time.Millisecond)
+
+	// Trigger cleanup
+	pool.cleanup()
+
+	// Verify entry was removed
+	pool.mu.Lock()
+	_, exists = pool.entries["expire-key"]
+	pool.mu.Unlock()
+	if exists {
+		t.Error("expired entry should be removed after cleanup")
+	}
+}
+
+func TestRelayPool_Cleanup_KeepsRecent(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Hour, logger) // Long TTL
+	defer pool.Close()
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	_, _ = pool.GetOrCreate(ctx, "recent-key", createFunc)
+
+	// Trigger cleanup
+	pool.cleanup()
+
+	// Verify entry still exists (TTL not expired)
+	pool.mu.Lock()
+	_, exists := pool.entries["recent-key"]
+	pool.mu.Unlock()
+	if !exists {
+		t.Error("recent entry should not be removed")
+	}
+}
+
+func TestRelayPool_Close_Idempotent(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+
+	// Multiple closes should not panic
+	pool.Close()
+	pool.Close()
+	pool.Close()
+}
+
+func TestRelayPool_Close_StopsCleanupLoop(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+
+	// Close the pool
+	pool.Close()
+
+	// Verify stopCh is closed (attempting to close again would panic if not using stopOnce)
+	select {
+	case <-pool.stopCh:
+		// Expected - channel is closed
+	default:
+		t.Error("stopCh should be closed after Close()")
+	}
+}
+
+func TestRelayPool_NilLogger(t *testing.T) {
+	// Should not panic with nil logger
+	pool := NewRelayPool(10*time.Millisecond, nil)
+	defer pool.Close()
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	_, _ = pool.GetOrCreate(ctx, "test-key", createFunc)
+
+	// Wait for TTL to expire
+	time.Sleep(20 * time.Millisecond)
+
+	// Trigger cleanup - should not panic even with nil logger
+	pool.cleanup()
+}
+
+// --- Additional Common Helper Tests ---
+
+func TestConnKey_IPv6(t *testing.T) {
+	srcAddr := &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 12345}
+	dstAddr := &net.TCPAddr{IP: net.ParseIP("2001:db8::2"), Port: 443}
+
+	key := connKey(srcAddr, dstAddr)
+	expected := "[2001:db8::1]:12345->[2001:db8::2]:443"
+
+	if key != expected {
+		t.Errorf("connKey = %q, want %q", key, expected)
+	}
+}
+
+func TestAddrKey_IPv6(t *testing.T) {
+	ip := net.ParseIP("2001:db8::1")
+	port := uint16(443)
+
+	key := addrKey(ip, port)
+	expected := "2001:db8::1:443"
+
+	if key != expected {
+		t.Errorf("addrKey = %q, want %q", key, expected)
+	}
+}
+
+func TestNewSOCKS5Address_IPv4Mapped(t *testing.T) {
+	// IPv4-mapped IPv6 address should be treated as IPv4
+	ip := net.ParseIP("::ffff:192.168.1.1")
+	port := uint16(80)
+
+	addr := newSOCKS5Address(ip, port)
+
+	// To4() returns non-nil for IPv4-mapped addresses
+	if addr.Type != socks5.AddrTypeIPv4 {
+		t.Errorf("Type = %d, want %d (IPv4-mapped should be treated as IPv4)", addr.Type, socks5.AddrTypeIPv4)
+	}
+}
+
+func TestClientHolder_NilClient(t *testing.T) {
+	holder := &clientHolder{}
+
+	if holder.Get() != nil {
+		t.Error("Get should return nil for uninitialized holder")
+	}
+
+	holder.Set(nil)
+	if holder.Get() != nil {
+		t.Error("Get should return nil after setting nil")
+	}
+}
+
+// --- Benchmark Tests ---
+
+func BenchmarkConnKey(b *testing.B) {
+	srcAddr := &net.TCPAddr{IP: net.ParseIP("192.168.1.1"), Port: 12345}
+	dstAddr := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 80}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = connKey(srcAddr, dstAddr)
+	}
+}
+
+func BenchmarkAddrKey(b *testing.B) {
+	ip := net.ParseIP("192.168.1.1")
+	port := uint16(12345)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = addrKey(ip, port)
+	}
+}
+
+func BenchmarkNewSOCKS5Address(b *testing.B) {
+	ip := net.ParseIP("192.168.1.1").To4()
+	port := uint16(80)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = newSOCKS5Address(ip, port)
+	}
+}
+
+func BenchmarkRelayPool_GetOrCreate(b *testing.B) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		return nil, nil
+	}
+
+	ctx := context.Background()
+	// Pre-create the entry
+	_, _ = pool.GetOrCreate(ctx, "bench-key", createFunc)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = pool.GetOrCreate(ctx, "bench-key", createFunc)
+	}
+}
+
+func BenchmarkClientHolder_GetSet(b *testing.B) {
+	holder := &clientHolder{client: &socks5.Client{}}
+	client := &socks5.Client{}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		holder.Set(client)
+		_ = holder.Get()
+	}
+}

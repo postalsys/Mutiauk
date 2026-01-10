@@ -477,3 +477,388 @@ func TestConfigRoutesToRoutes_RouteStructure(t *testing.T) {
 		t.Error("Enabled = false, want true")
 	}
 }
+
+// --- DaemonAPIClient Tests with Mock Server ---
+
+func TestDaemonAPIClient_AddRoute_WithMockServer(t *testing.T) {
+	// Create temporary socket
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test.sock")
+
+	// Start mock server
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	// Handle requests in goroutine
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handleMockRouteAdd(conn)
+		}
+	}()
+
+	// Create client
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: socketPath,
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	if !client.IsRunning() {
+		t.Fatal("client should detect running daemon")
+	}
+
+	// Test successful AddRoute
+	result, err := client.AddRoute("10.0.0.0/8", "test route", true)
+	if err != nil {
+		t.Errorf("AddRoute() error = %v", err)
+	}
+	if result == nil {
+		t.Error("AddRoute() result is nil")
+	} else {
+		if !result.Success {
+			t.Error("result.Success = false, want true")
+		}
+		if !result.Persisted {
+			t.Error("result.Persisted = false, want true")
+		}
+	}
+}
+
+func TestDaemonAPIClient_RemoveRoute_WithMockServer(t *testing.T) {
+	// Create temporary socket
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test.sock")
+
+	// Start mock server
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	// Handle requests in goroutine
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handleMockRouteRemove(conn)
+		}
+	}()
+
+	// Create client
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: socketPath,
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	// Test successful RemoveRoute
+	result, err := client.RemoveRoute("10.0.0.0/8", true)
+	if err != nil {
+		t.Errorf("RemoveRoute() error = %v", err)
+	}
+	if result == nil {
+		t.Error("RemoveRoute() result is nil")
+	} else {
+		if !result.Success {
+			t.Error("result.Success = false, want true")
+		}
+		if !result.Persisted {
+			t.Error("result.Persisted = false, want true")
+		}
+	}
+}
+
+func TestDaemonAPIClient_AddRoute_FailedResult(t *testing.T) {
+	// Create temporary socket
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test.sock")
+
+	// Start mock server that returns failure
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handleMockRouteAddFailure(conn)
+		}
+	}()
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: socketPath,
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	result, err := client.AddRoute("10.0.0.0/8", "test", false)
+
+	if err == nil {
+		t.Error("AddRoute() expected error for failed result")
+	}
+	if result != nil {
+		t.Error("AddRoute() expected nil result on failure")
+	}
+	if err != nil && !contains(err.Error(), "failed to add route") {
+		t.Errorf("error should mention 'failed to add route', got: %v", err)
+	}
+}
+
+func TestDaemonAPIClient_RemoveRoute_FailedResult(t *testing.T) {
+	// Create temporary socket
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test.sock")
+
+	// Start mock server that returns failure
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handleMockRouteRemoveFailure(conn)
+		}
+	}()
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: socketPath,
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	result, err := client.RemoveRoute("10.0.0.0/8", false)
+
+	if err == nil {
+		t.Error("RemoveRoute() expected error for failed result")
+	}
+	if result != nil {
+		t.Error("RemoveRoute() expected nil result on failure")
+	}
+}
+
+func TestDaemonAPIClient_IsRunning_True(t *testing.T) {
+	// Create temporary socket
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	defer listener.Close()
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: socketPath,
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	if !client.IsRunning() {
+		t.Error("IsRunning() = false, want true for running daemon")
+	}
+}
+
+func TestDaemonAPIClient_NewClient_SetsRunning(t *testing.T) {
+	// Without running daemon
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: "/nonexistent/socket.sock",
+		},
+	}
+	client := newDaemonAPIClient(cfg)
+
+	if client.running != false {
+		t.Error("running should be false for non-existent socket")
+	}
+}
+
+// Mock server handlers
+
+func handleMockRouteAdd(conn net.Conn) {
+	defer conn.Close()
+
+	// Read request (simple - just read and respond)
+	buf := make([]byte, 4096)
+	conn.Read(buf)
+
+	// Send success response
+	response := `{"id":1,"result":{"success":true,"message":"route added","persisted":true}}`
+	conn.Write([]byte(response + "\n"))
+}
+
+func handleMockRouteRemove(conn net.Conn) {
+	defer conn.Close()
+
+	buf := make([]byte, 4096)
+	conn.Read(buf)
+
+	response := `{"id":1,"result":{"success":true,"message":"route removed","persisted":true}}`
+	conn.Write([]byte(response + "\n"))
+}
+
+func handleMockRouteAddFailure(conn net.Conn) {
+	defer conn.Close()
+
+	buf := make([]byte, 4096)
+	conn.Read(buf)
+
+	response := `{"id":1,"result":{"success":false,"message":"route already exists"}}`
+	conn.Write([]byte(response + "\n"))
+}
+
+func handleMockRouteRemoveFailure(conn net.Conn) {
+	defer conn.Close()
+
+	buf := make([]byte, 4096)
+	conn.Read(buf)
+
+	response := `{"id":1,"result":{"success":false,"message":"route not found"}}`
+	conn.Write([]byte(response + "\n"))
+}
+
+// --- newRouteManager Tests ---
+
+func TestNewRouteManager_InvalidTUNName(t *testing.T) {
+	// This test may behave differently on Linux vs other platforms
+	// On non-Linux, route.NewManager may return an error
+	cfg := &config.Config{
+		TUN: config.TUNConfig{Name: ""},
+	}
+
+	mgr, err := newRouteManager(cfg)
+
+	// Either an error or a manager is acceptable depending on platform
+	if err == nil && mgr == nil {
+		t.Error("newRouteManager should return either a manager or an error")
+	}
+}
+
+// --- RouteAddResult and RouteRemoveResult Tests ---
+
+func TestRouteAddResult_Fields(t *testing.T) {
+	tests := []struct {
+		name      string
+		success   bool
+		persisted bool
+	}{
+		{"both true", true, true},
+		{"success only", true, false},
+		{"neither", false, false},
+		{"persisted only", false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := &RouteAddResult{
+				Success:   tt.success,
+				Persisted: tt.persisted,
+			}
+			if result.Success != tt.success {
+				t.Errorf("Success = %v, want %v", result.Success, tt.success)
+			}
+			if result.Persisted != tt.persisted {
+				t.Errorf("Persisted = %v, want %v", result.Persisted, tt.persisted)
+			}
+		})
+	}
+}
+
+func TestRouteRemoveResult_Fields(t *testing.T) {
+	tests := []struct {
+		name      string
+		success   bool
+		persisted bool
+	}{
+		{"both true", true, true},
+		{"success only", true, false},
+		{"neither", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := &RouteRemoveResult{
+				Success:   tt.success,
+				Persisted: tt.persisted,
+			}
+			if result.Success != tt.success {
+				t.Errorf("Success = %v, want %v", result.Success, tt.success)
+			}
+			if result.Persisted != tt.persisted {
+				t.Errorf("Persisted = %v, want %v", result.Persisted, tt.persisted)
+			}
+		})
+	}
+}
+
+// --- Benchmark Tests ---
+
+func BenchmarkConfigRoutesToRoutes(b *testing.B) {
+	cfg := &config.Config{
+		TUN: config.TUNConfig{Name: "tun0"},
+		Routes: []config.RouteConfig{
+			{Destination: "10.0.0.0/8", Comment: "A", Enabled: true},
+			{Destination: "172.16.0.0/12", Comment: "B", Enabled: true},
+			{Destination: "192.168.0.0/16", Comment: "C", Enabled: true},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = configRoutesToRoutes(cfg)
+	}
+}
+
+func BenchmarkConfigRoutesToRoutesAll(b *testing.B) {
+	cfg := &config.Config{
+		TUN: config.TUNConfig{Name: "tun0"},
+		Routes: []config.RouteConfig{
+			{Destination: "10.0.0.0/8", Comment: "A", Enabled: true},
+			{Destination: "172.16.0.0/12", Comment: "B", Enabled: false},
+			{Destination: "192.168.0.0/16", Comment: "C", Enabled: true},
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = configRoutesToRoutesAll(cfg)
+	}
+}
+
+func BenchmarkNewDaemonAPIClient(b *testing.B) {
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			SocketPath: "/nonexistent/socket.sock",
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = newDaemonAPIClient(cfg)
+	}
+}
