@@ -55,6 +55,21 @@ make logs
 
 - **ASCII only**: Do not use emojis or non-ASCII characters in code, comments, documentation, commit messages, or any other text files.
 
+## Code Quality
+
+After completing large changes (new features, significant refactoring, or adding multiple files), use the `code-simplifier` agent to review and simplify the affected code. This helps:
+- Eliminate code duplication
+- Extract shared logic into reusable helpers
+- Improve separation of concerns
+- Maintain consistent patterns across the codebase
+
+Run the simplifier on specific packages:
+```
+Use code-simplifier to simplify internal/<package>/. Focus on consolidating duplication and extracting shared patterns.
+```
+
+Always verify changes with `make test` in Docker after simplification.
+
 ## Architecture
 
 ### Data Flow
