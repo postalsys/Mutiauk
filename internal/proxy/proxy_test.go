@@ -24,14 +24,14 @@ func TestNewTCPForwarder(t *testing.T) {
 	if forwarder == nil {
 		t.Fatal("NewTCPForwarder returned nil")
 	}
-	if forwarder.client != client {
+	if forwarder.clientHolder.Get() != client {
 		t.Error("client not set correctly")
 	}
 	if forwarder.natTable != natTable {
 		t.Error("natTable not set correctly")
 	}
-	if forwarder.bufferSize != 32*1024 {
-		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, 32*1024)
+	if forwarder.bufferSize != DefaultTCPBufferSize {
+		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, DefaultTCPBufferSize)
 	}
 }
 
@@ -43,17 +43,13 @@ func TestTCPForwarder_UpdateClient(t *testing.T) {
 
 	forwarder := NewTCPForwarder(client1, natTable, logger)
 
-	if forwarder.client != client1 {
+	if forwarder.clientHolder.Get() != client1 {
 		t.Error("initial client not set correctly")
 	}
 
 	forwarder.UpdateClient(client2)
 
-	forwarder.mu.RLock()
-	currentClient := forwarder.client
-	forwarder.mu.RUnlock()
-
-	if currentClient != client2 {
+	if forwarder.clientHolder.Get() != client2 {
 		t.Error("client not updated correctly")
 	}
 }
@@ -79,9 +75,7 @@ func TestTCPForwarder_UpdateClient_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			forwarder.mu.RLock()
-			_ = forwarder.client
-			forwarder.mu.RUnlock()
+			_ = forwarder.clientHolder.Get()
 		}()
 	}
 
@@ -125,13 +119,8 @@ func TestTCPForwarder_PendingConnections(t *testing.T) {
 	}
 }
 
-// TestTCPForwarder_Relay tests the bidirectional relay function
-func TestTCPForwarder_Relay(t *testing.T) {
-	logger := zap.NewNop()
-	client := &socks5.Client{}
-	natTable := nat.NewTable(nat.DefaultConfig())
-	forwarder := NewTCPForwarder(client, natTable, logger)
-
+// TestBidirectionalCopy tests the bidirectional copy function
+func TestBidirectionalCopy(t *testing.T) {
 	// Create two pipe pairs for local and remote
 	localClient, localServer := net.Pipe()
 	remoteClient, remoteServer := net.Pipe()
@@ -147,7 +136,7 @@ func TestTCPForwarder_Relay(t *testing.T) {
 	// Start relay in goroutine
 	relayDone := make(chan error, 1)
 	go func() {
-		relayDone <- forwarder.relay(ctx, localServer, remoteClient)
+		relayDone <- bidirectionalCopy(ctx, localServer, remoteClient, DefaultTCPBufferSize)
 	}()
 
 	// Test local -> remote
@@ -192,12 +181,7 @@ func TestTCPForwarder_Relay(t *testing.T) {
 	}
 }
 
-func TestTCPForwarder_Relay_ContextCancel(t *testing.T) {
-	logger := zap.NewNop()
-	client := &socks5.Client{}
-	natTable := nat.NewTable(nat.DefaultConfig())
-	forwarder := NewTCPForwarder(client, natTable, logger)
-
+func TestBidirectionalCopy_ContextCancel(t *testing.T) {
 	localClient, localServer := net.Pipe()
 	remoteClient, remoteServer := net.Pipe()
 
@@ -210,7 +194,7 @@ func TestTCPForwarder_Relay_ContextCancel(t *testing.T) {
 
 	relayDone := make(chan error, 1)
 	go func() {
-		relayDone <- forwarder.relay(ctx, localServer, remoteClient)
+		relayDone <- bidirectionalCopy(ctx, localServer, remoteClient, DefaultTCPBufferSize)
 	}()
 
 	// Give relay time to start
@@ -242,23 +226,22 @@ func TestNewUDPForwarder(t *testing.T) {
 	if forwarder == nil {
 		t.Fatal("NewUDPForwarder returned nil")
 	}
-	if forwarder.client != client {
+	if forwarder.clientHolder.Get() != client {
 		t.Error("client not set correctly")
 	}
 	if forwarder.natTable != natTable {
 		t.Error("natTable not set correctly")
 	}
-	if forwarder.bufferSize != 65535 {
+	if forwarder.bufferSize != DefaultUDPBufferSize {
 		t.Errorf("bufferSize = %d, want 65535", forwarder.bufferSize)
 	}
-	if forwarder.relayTTL != 5*time.Minute {
-		t.Errorf("relayTTL = %v, want 5m", forwarder.relayTTL)
+	if forwarder.relayTTL() != 5*time.Minute {
+		t.Errorf("relayTTL = %v, want 5m", forwarder.relayTTL())
 	}
 	if forwarder.relayPool == nil {
 		t.Error("relayPool not initialized")
 	}
 
-	// Clean up the cleanup goroutine
 	forwarder.Close()
 }
 
@@ -273,11 +256,7 @@ func TestUDPForwarder_UpdateClient(t *testing.T) {
 
 	forwarder.UpdateClient(client2)
 
-	forwarder.mu.RLock()
-	currentClient := forwarder.client
-	forwarder.mu.RUnlock()
-
-	if currentClient != client2 {
+	if forwarder.clientHolder.Get() != client2 {
 		t.Error("client not updated correctly")
 	}
 }
@@ -291,15 +270,6 @@ func TestUDPForwarder_Close(t *testing.T) {
 
 	// Close should not panic
 	forwarder.Close()
-
-	// Pool should be empty after close
-	forwarder.poolMu.Lock()
-	poolLen := len(forwarder.relayPool)
-	forwarder.poolMu.Unlock()
-
-	if poolLen != 0 {
-		t.Errorf("relay pool should be empty after Close, got %d entries", poolLen)
-	}
 }
 
 func TestUDPForwarder_Close_Multiple(t *testing.T) {
@@ -326,11 +296,11 @@ func TestNewRawUDPForwarder(t *testing.T) {
 	if forwarder == nil {
 		t.Fatal("NewRawUDPForwarder returned nil")
 	}
-	if forwarder.client != client {
+	if forwarder.clientHolder.Get() != client {
 		t.Error("client not set correctly")
 	}
-	if forwarder.relayTTL != 5*time.Minute {
-		t.Errorf("relayTTL = %v, want 5m", forwarder.relayTTL)
+	if forwarder.relayTTL() != 5*time.Minute {
+		t.Errorf("relayTTL = %v, want 5m", forwarder.relayTTL())
 	}
 	if forwarder.relayPool == nil {
 		t.Error("relayPool not initialized")
@@ -349,11 +319,7 @@ func TestRawUDPForwarder_UpdateClient(t *testing.T) {
 
 	forwarder.UpdateClient(client2)
 
-	forwarder.mu.RLock()
-	currentClient := forwarder.client
-	forwarder.mu.RUnlock()
-
-	if currentClient != client2 {
+	if forwarder.clientHolder.Get() != client2 {
 		t.Error("client not updated correctly")
 	}
 }
@@ -366,15 +332,6 @@ func TestRawUDPForwarder_Close(t *testing.T) {
 
 	// Close should not panic
 	forwarder.Close()
-
-	// Pool should be empty after close
-	forwarder.poolMu.Lock()
-	poolLen := len(forwarder.relayPool)
-	forwarder.poolMu.Unlock()
-
-	if poolLen != 0 {
-		t.Errorf("relay pool should be empty after Close, got %d entries", poolLen)
-	}
 }
 
 func TestRawUDPForwarder_Close_Multiple(t *testing.T) {
@@ -389,27 +346,67 @@ func TestRawUDPForwarder_Close_Multiple(t *testing.T) {
 	forwarder.Close()
 }
 
-// --- relayEntry Tests ---
+// --- RelayPool Tests ---
 
-func TestRelayEntry_Fields(t *testing.T) {
-	entry := relayEntry{
-		relay:    nil, // Would be a real UDPRelay
-		lastUsed: time.Now(),
+func TestRelayPool_GetOrCreate(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	callCount := 0
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		callCount++
+		return nil, nil // For this test we just verify creation logic
 	}
 
-	if time.Since(entry.lastUsed) > time.Second {
-		t.Error("lastUsed should be recent")
+	ctx := context.Background()
+
+	// First call should create
+	_, _ = pool.GetOrCreate(ctx, "test-key", createFunc)
+	if callCount != 1 {
+		t.Errorf("expected createFunc to be called once, got %d", callCount)
+	}
+
+	// Second call should reuse
+	_, _ = pool.GetOrCreate(ctx, "test-key", createFunc)
+	if callCount != 1 {
+		t.Errorf("expected createFunc to not be called again, got %d calls", callCount)
+	}
+
+	// Different key should create new
+	_, _ = pool.GetOrCreate(ctx, "other-key", createFunc)
+	if callCount != 2 {
+		t.Errorf("expected createFunc to be called for new key, got %d calls", callCount)
 	}
 }
 
-func TestRawRelayEntry_Fields(t *testing.T) {
-	entry := rawRelayEntry{
-		relay:    nil, // Would be a real UDPRelay
-		lastUsed: time.Now(),
+func TestRelayPool_Clear(t *testing.T) {
+	logger := zap.NewNop()
+	pool := NewRelayPool(time.Minute, logger)
+	defer pool.Close()
+
+	// Add some entries
+	ctx := context.Background()
+	callCount := 0
+	createFunc := func(ctx context.Context) (*socks5.UDPRelay, error) {
+		callCount++
+		return nil, nil
 	}
 
-	if time.Since(entry.lastUsed) > time.Second {
-		t.Error("lastUsed should be recent")
+	_, _ = pool.GetOrCreate(ctx, "key1", createFunc)
+	_, _ = pool.GetOrCreate(ctx, "key2", createFunc)
+
+	if callCount != 2 {
+		t.Errorf("expected 2 creates, got %d", callCount)
+	}
+
+	// Clear the pool
+	pool.Clear()
+
+	// Next access should create new entries
+	_, _ = pool.GetOrCreate(ctx, "key1", createFunc)
+	if callCount != 3 {
+		t.Errorf("expected new create after clear, got %d", callCount)
 	}
 }
 
@@ -430,9 +427,7 @@ func TestTCPForwarder_ConcurrentUpdateClient(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			forwarder.mu.RLock()
-			_ = forwarder.client
-			forwarder.mu.RUnlock()
+			_ = forwarder.clientHolder.Get()
 		}()
 	}
 	wg.Wait()
@@ -454,9 +449,7 @@ func TestUDPForwarder_ConcurrentOperations(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			forwarder.poolMu.Lock()
-			_ = len(forwarder.relayPool)
-			forwarder.poolMu.Unlock()
+			_ = forwarder.clientHolder.Get()
 		}()
 	}
 	wg.Wait()
@@ -477,9 +470,7 @@ func TestRawUDPForwarder_ConcurrentOperations(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			forwarder.poolMu.Lock()
-			_ = len(forwarder.relayPool)
-			forwarder.poolMu.Unlock()
+			_ = forwarder.clientHolder.Get()
 		}()
 	}
 	wg.Wait()
@@ -487,12 +478,7 @@ func TestRawUDPForwarder_ConcurrentOperations(t *testing.T) {
 
 // --- Large Data Transfer Test ---
 
-func TestTCPForwarder_Relay_LargeData(t *testing.T) {
-	logger := zap.NewNop()
-	client := &socks5.Client{}
-	natTable := nat.NewTable(nat.DefaultConfig())
-	forwarder := NewTCPForwarder(client, natTable, logger)
-
+func TestBidirectionalCopy_LargeData(t *testing.T) {
 	localClient, localServer := net.Pipe()
 	remoteClient, remoteServer := net.Pipe()
 
@@ -501,7 +487,7 @@ func TestTCPForwarder_Relay_LargeData(t *testing.T) {
 
 	// Start relay
 	go func() {
-		forwarder.relay(ctx, localServer, remoteClient)
+		bidirectionalCopy(ctx, localServer, remoteClient, DefaultTCPBufferSize)
 	}()
 
 	// Send smaller data for faster test
@@ -567,9 +553,8 @@ func TestTCPForwarder_BufferSize(t *testing.T) {
 
 	forwarder := NewTCPForwarder(client, natTable, logger)
 
-	expectedSize := 32 * 1024 // 32KB
-	if forwarder.bufferSize != expectedSize {
-		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, expectedSize)
+	if forwarder.bufferSize != DefaultTCPBufferSize {
+		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, DefaultTCPBufferSize)
 	}
 }
 
@@ -581,9 +566,8 @@ func TestUDPForwarder_BufferSize(t *testing.T) {
 	forwarder := NewUDPForwarder(client, natTable, logger)
 	defer forwarder.Close()
 
-	expectedSize := 65535 // Max UDP packet size
-	if forwarder.bufferSize != expectedSize {
-		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, expectedSize)
+	if forwarder.bufferSize != DefaultUDPBufferSize {
+		t.Errorf("bufferSize = %d, want %d", forwarder.bufferSize, DefaultUDPBufferSize)
 	}
 }
 
@@ -598,8 +582,8 @@ func TestUDPForwarder_RelayTTL(t *testing.T) {
 	defer forwarder.Close()
 
 	expectedTTL := 5 * time.Minute
-	if forwarder.relayTTL != expectedTTL {
-		t.Errorf("relayTTL = %v, want %v", forwarder.relayTTL, expectedTTL)
+	if forwarder.relayTTL() != expectedTTL {
+		t.Errorf("relayTTL = %v, want %v", forwarder.relayTTL(), expectedTTL)
 	}
 }
 
@@ -611,7 +595,102 @@ func TestRawUDPForwarder_RelayTTL(t *testing.T) {
 	defer forwarder.Close()
 
 	expectedTTL := 5 * time.Minute
-	if forwarder.relayTTL != expectedTTL {
-		t.Errorf("relayTTL = %v, want %v", forwarder.relayTTL, expectedTTL)
+	if forwarder.relayTTL() != expectedTTL {
+		t.Errorf("relayTTL = %v, want %v", forwarder.relayTTL(), expectedTTL)
 	}
+}
+
+// --- Common Helper Tests ---
+
+func TestConnKey(t *testing.T) {
+	srcAddr := &net.TCPAddr{IP: net.ParseIP("192.168.1.1"), Port: 12345}
+	dstAddr := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 80}
+
+	key := connKey(srcAddr, dstAddr)
+	expected := "192.168.1.1:12345->10.0.0.1:80"
+
+	if key != expected {
+		t.Errorf("connKey = %q, want %q", key, expected)
+	}
+}
+
+func TestAddrKey(t *testing.T) {
+	ip := net.ParseIP("192.168.1.1")
+	port := uint16(12345)
+
+	key := addrKey(ip, port)
+	expected := "192.168.1.1:12345"
+
+	if key != expected {
+		t.Errorf("addrKey = %q, want %q", key, expected)
+	}
+}
+
+func TestNewSOCKS5Address_IPv4(t *testing.T) {
+	ip := net.ParseIP("192.168.1.1").To4()
+	port := uint16(80)
+
+	addr := newSOCKS5Address(ip, port)
+
+	if addr.Type != socks5.AddrTypeIPv4 {
+		t.Errorf("Type = %d, want %d", addr.Type, socks5.AddrTypeIPv4)
+	}
+	if !addr.IP.Equal(ip) {
+		t.Errorf("IP = %v, want %v", addr.IP, ip)
+	}
+	if addr.Port != port {
+		t.Errorf("Port = %d, want %d", addr.Port, port)
+	}
+}
+
+func TestNewSOCKS5Address_IPv6(t *testing.T) {
+	ip := net.ParseIP("2001:db8::1")
+	port := uint16(443)
+
+	addr := newSOCKS5Address(ip, port)
+
+	if addr.Type != socks5.AddrTypeIPv6 {
+		t.Errorf("Type = %d, want %d", addr.Type, socks5.AddrTypeIPv6)
+	}
+	if !addr.IP.Equal(ip) {
+		t.Errorf("IP = %v, want %v", addr.IP, ip)
+	}
+	if addr.Port != port {
+		t.Errorf("Port = %d, want %d", addr.Port, port)
+	}
+}
+
+func TestClientHolder(t *testing.T) {
+	client1 := &socks5.Client{}
+	client2 := &socks5.Client{}
+
+	holder := &clientHolder{client: client1}
+
+	if holder.Get() != client1 {
+		t.Error("Get returned wrong client")
+	}
+
+	holder.Set(client2)
+
+	if holder.Get() != client2 {
+		t.Error("Get after Set returned wrong client")
+	}
+}
+
+func TestClientHolder_Concurrent(t *testing.T) {
+	holder := &clientHolder{client: &socks5.Client{}}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			holder.Set(&socks5.Client{})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = holder.Get()
+		}()
+	}
+	wg.Wait()
 }

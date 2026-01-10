@@ -36,10 +36,9 @@ func newDaemonStartCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log := GetLogger()
 
-			// Load configuration
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			if err := cfg.Validate(); err != nil {
@@ -52,41 +51,19 @@ func newDaemonStartCmd() *cobra.Command {
 				zap.String("socks5", cfg.SOCKS5.Server),
 			)
 
-			// Create daemon server
 			srv, err := daemon.New(cfg, cfgFile, log)
 			if err != nil {
 				return fmt.Errorf("failed to create daemon: %w", err)
 			}
 
-			// Set up signal handling
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-			go func() {
-				for sig := range sigCh {
-					switch sig {
-					case syscall.SIGHUP:
-						log.Info("received SIGHUP, reloading configuration")
-						newCfg, err := config.Load(cfgFile)
-						if err != nil {
-							log.Error("failed to reload config", zap.Error(err))
-							continue
-						}
-						if err := srv.Reload(newCfg); err != nil {
-							log.Error("failed to apply new config", zap.Error(err))
-						}
-					case syscall.SIGINT, syscall.SIGTERM:
-						log.Info("received shutdown signal", zap.String("signal", sig.String()))
-						cancel()
-						return
-					}
-				}
-			}()
+			go handleDaemonSignals(sigCh, log, srv, cancel)
 
-			// Start the daemon
 			if err := srv.Run(ctx); err != nil && err != context.Canceled {
 				return fmt.Errorf("daemon error: %w", err)
 			}
@@ -101,32 +78,38 @@ func newDaemonStartCmd() *cobra.Command {
 	return cmd
 }
 
+func handleDaemonSignals(sigCh chan os.Signal, log *zap.Logger, srv *daemon.Server, cancel context.CancelFunc) {
+	for sig := range sigCh {
+		switch sig {
+		case syscall.SIGHUP:
+			log.Info("received SIGHUP, reloading configuration")
+			newCfg, err := config.Load(cfgFile)
+			if err != nil {
+				log.Error("failed to reload config", zap.Error(err))
+				continue
+			}
+			if err := srv.Reload(newCfg); err != nil {
+				log.Error("failed to apply new config", zap.Error(err))
+			}
+		case syscall.SIGINT, syscall.SIGTERM:
+			log.Info("received shutdown signal", zap.String("signal", sig.String()))
+			cancel()
+			return
+		}
+	}
+}
+
 func newDaemonStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			pid, err := daemon.ReadPIDFile(cfg.Daemon.PIDFile)
-			if err != nil {
-				return fmt.Errorf("daemon not running or PID file not found: %w", err)
-			}
-
-			process, err := os.FindProcess(pid)
-			if err != nil {
-				return fmt.Errorf("failed to find process: %w", err)
-			}
-
-			if err := process.Signal(syscall.SIGTERM); err != nil {
-				return fmt.Errorf("failed to send SIGTERM: %w", err)
-			}
-
-			fmt.Printf("Sent SIGTERM to daemon (PID %d)\n", pid)
-			return nil
+			return signalDaemon(cfg, syscall.SIGTERM, "SIGTERM")
 		},
 	}
 }
@@ -136,29 +119,33 @@ func newDaemonReloadCmd() *cobra.Command {
 		Use:   "reload",
 		Short: "Reload daemon configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			pid, err := daemon.ReadPIDFile(cfg.Daemon.PIDFile)
-			if err != nil {
-				return fmt.Errorf("daemon not running or PID file not found: %w", err)
-			}
-
-			process, err := os.FindProcess(pid)
-			if err != nil {
-				return fmt.Errorf("failed to find process: %w", err)
-			}
-
-			if err := process.Signal(syscall.SIGHUP); err != nil {
-				return fmt.Errorf("failed to send SIGHUP: %w", err)
-			}
-
-			fmt.Printf("Sent SIGHUP to daemon (PID %d)\n", pid)
-			return nil
+			return signalDaemon(cfg, syscall.SIGHUP, "SIGHUP")
 		},
 	}
+}
+
+func signalDaemon(cfg *config.Config, sig syscall.Signal, sigName string) error {
+	pid, err := daemon.ReadPIDFile(cfg.Daemon.PIDFile)
+	if err != nil {
+		return fmt.Errorf("daemon not running or PID file not found: %w", err)
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("failed to find process: %w", err)
+	}
+
+	if err := process.Signal(sig); err != nil {
+		return fmt.Errorf("failed to send %s: %w", sigName, err)
+	}
+
+	fmt.Printf("Sent %s to daemon (PID %d)\n", sigName, pid)
+	return nil
 }
 
 func newDaemonStatusCmd() *cobra.Command {
@@ -166,9 +153,9 @@ func newDaemonStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show daemon status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			pid, err := daemon.ReadPIDFile(cfg.Daemon.PIDFile)
@@ -177,7 +164,6 @@ func newDaemonStatusCmd() *cobra.Command {
 				return nil
 			}
 
-			// Check if process is actually running
 			process, err := os.FindProcess(pid)
 			if err != nil {
 				fmt.Println("Daemon is not running (stale PID file)")

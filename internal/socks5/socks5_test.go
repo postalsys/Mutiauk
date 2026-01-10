@@ -661,6 +661,60 @@ func TestAddressToTCPAddr(t *testing.T) {
 	}
 }
 
+func TestNewAddressFromUDPAddr(t *testing.T) {
+	tests := []struct {
+		name     string
+		udpAddr  *net.UDPAddr
+		wantType byte
+		wantIP   net.IP
+		wantPort uint16
+	}{
+		{
+			name:     "nil address",
+			udpAddr:  nil,
+			wantType: AddrTypeIPv4,
+			wantIP:   net.IPv4zero,
+			wantPort: 0,
+		},
+		{
+			name:     "nil IP",
+			udpAddr:  &net.UDPAddr{IP: nil, Port: 1234},
+			wantType: AddrTypeIPv4,
+			wantIP:   net.IPv4zero,
+			wantPort: 0,
+		},
+		{
+			name:     "IPv4 address",
+			udpAddr:  &net.UDPAddr{IP: net.ParseIP("192.168.1.1"), Port: 5353},
+			wantType: AddrTypeIPv4,
+			wantIP:   net.ParseIP("192.168.1.1").To4(),
+			wantPort: 5353,
+		},
+		{
+			name:     "IPv6 address",
+			udpAddr:  &net.UDPAddr{IP: net.ParseIP("::1"), Port: 8080},
+			wantType: AddrTypeIPv6,
+			wantIP:   net.ParseIP("::1"),
+			wantPort: 8080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := NewAddressFromUDPAddr(tt.udpAddr)
+			if addr.Type != tt.wantType {
+				t.Errorf("Type = %v, want %v", addr.Type, tt.wantType)
+			}
+			if !addr.IP.Equal(tt.wantIP) {
+				t.Errorf("IP = %v, want %v", addr.IP, tt.wantIP)
+			}
+			if addr.Port != tt.wantPort {
+				t.Errorf("Port = %v, want %v", addr.Port, tt.wantPort)
+			}
+		})
+	}
+}
+
 // TestUserPassAuthAuthenticate tests the actual authentication protocol
 func TestUserPassAuthAuthenticate(t *testing.T) {
 	// Create a pipe to simulate connection

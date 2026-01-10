@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -13,49 +12,39 @@ import (
 	"go.uber.org/zap"
 )
 
-// TCPForwarder forwards TCP connections through SOCKS5
+// TCPForwarder forwards TCP connections through SOCKS5.
 type TCPForwarder struct {
-	mu       sync.RWMutex
-	client   *socks5.Client
-	natTable *nat.Table
-	logger   *zap.Logger
-
+	clientHolder
+	natTable   *nat.Table
+	logger     *zap.Logger
 	bufferSize int
 
-	// pendingConns holds pre-established SOCKS5 connections waiting for local endpoint
-	pendingConns sync.Map // key: "srcIP:srcPort->dstIP:dstPort", value: net.Conn
+	// pendingConns holds pre-established SOCKS5 connections waiting for local endpoint.
+	pendingConns sync.Map
 }
 
-// NewTCPForwarder creates a new TCP forwarder
+// NewTCPForwarder creates a new TCP forwarder.
 func NewTCPForwarder(client *socks5.Client, natTable *nat.Table, logger *zap.Logger) *TCPForwarder {
 	return &TCPForwarder{
-		client:     client,
-		natTable:   natTable,
-		logger:     logger,
-		bufferSize: 32 * 1024, // 32KB buffer
+		clientHolder: clientHolder{client: client},
+		natTable:     natTable,
+		logger:       logger,
+		bufferSize:   DefaultTCPBufferSize,
 	}
 }
 
-// UpdateClient updates the SOCKS5 client
+// UpdateClient updates the SOCKS5 client.
 func (f *TCPForwarder) UpdateClient(client *socks5.Client) {
-	f.mu.Lock()
-	f.client = client
-	f.mu.Unlock()
+	f.clientHolder.Set(client)
 }
 
 // PreConnect establishes the SOCKS5 connection BEFORE the TCP handshake is completed.
 // This allows us to reject connections to unreachable destinations with RST,
 // making port scanning through the proxy accurate.
-// Returns the established proxy connection or error if destination is unreachable.
 func (f *TCPForwarder) PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr) (net.Conn, error) {
-	f.mu.RLock()
-	client := f.client
-	f.mu.RUnlock()
+	client := f.clientHolder.Get()
+	targetAddr := dstAddr.(*net.TCPAddr).String()
 
-	dstTCP := dstAddr.(*net.TCPAddr)
-	targetAddr := dstTCP.String()
-
-	// Try to establish SOCKS5 connection
 	proxyConn, err := client.Connect(ctx, targetAddr)
 	if err != nil {
 		f.logger.Debug("SOCKS5 pre-connect failed",
@@ -66,9 +55,7 @@ func (f *TCPForwarder) PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr
 		return nil, err
 	}
 
-	// Store the connection for HandleTCP to use
-	key := fmt.Sprintf("%s->%s", srcAddr.String(), dstAddr.String())
-	f.pendingConns.Store(key, proxyConn)
+	f.pendingConns.Store(connKey(srcAddr, dstAddr), proxyConn)
 
 	f.logger.Debug("SOCKS5 pre-connect succeeded",
 		zap.String("src", srcAddr.String()),
@@ -78,29 +65,23 @@ func (f *TCPForwarder) PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr
 	return proxyConn, nil
 }
 
-// HandleTCP handles a TCP connection from the TUN interface
+// HandleTCP handles a TCP connection from the TUN interface.
 func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error {
 	defer conn.Close()
 
-	// Parse addresses for NAT tracking
 	srcTCP := srcAddr.(*net.TCPAddr)
 	dstTCP := dstAddr.(*net.TCPAddr)
-
 	srcAddrPort := netip.MustParseAddrPort(srcTCP.String())
 	dstAddrPort := netip.MustParseAddrPort(dstTCP.String())
 
-	// Check for existing NAT entry
-	entry, exists := f.natTable.Lookup("tcp", srcAddrPort, dstAddrPort)
-	if exists && entry.ProxyConn != nil {
-		// Use existing connection (shouldn't happen for TCP, but handle it)
+	if entry, exists := f.natTable.Lookup("tcp", srcAddrPort, dstAddrPort); exists && entry.ProxyConn != nil {
 		f.logger.Debug("using existing NAT entry",
 			zap.String("src", srcAddr.String()),
 			zap.String("dst", dstAddr.String()),
 		)
 	}
 
-	// Check for pre-established connection from PreConnect
-	key := fmt.Sprintf("%s->%s", srcAddr.String(), dstAddr.String())
+	key := connKey(srcAddr, dstAddr)
 	var proxyConn net.Conn
 
 	if pending, ok := f.pendingConns.LoadAndDelete(key); ok {
@@ -110,14 +91,9 @@ func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, ds
 			zap.String("dst", dstAddr.String()),
 		)
 	} else {
-		// Fallback: establish connection now (for backwards compatibility)
-		f.mu.RLock()
-		client := f.client
-		f.mu.RUnlock()
-
-		targetAddr := dstTCP.String()
+		client := f.clientHolder.Get()
 		var err error
-		proxyConn, err = client.Connect(ctx, targetAddr)
+		proxyConn, err = client.Connect(ctx, dstTCP.String())
 		if err != nil {
 			f.logger.Error("SOCKS5 connect failed",
 				zap.String("src", srcAddr.String()),
@@ -129,8 +105,7 @@ func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, ds
 	}
 	defer proxyConn.Close()
 
-	// Create NAT entry
-	entry = &nat.Entry{
+	entry := &nat.Entry{
 		Protocol:  "tcp",
 		SrcAddr:   srcAddrPort,
 		DstAddr:   dstAddrPort,
@@ -139,9 +114,7 @@ func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, ds
 	}
 
 	if err := f.natTable.Insert(entry); err != nil {
-		f.logger.Debug("failed to insert NAT entry (may already exist)",
-			zap.Error(err),
-		)
+		f.logger.Debug("failed to insert NAT entry (may already exist)", zap.Error(err))
 	}
 	defer f.natTable.Remove("tcp", srcAddrPort, dstAddrPort)
 
@@ -150,32 +123,5 @@ func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, ds
 		zap.String("dst", dstAddr.String()),
 	)
 
-	// Bidirectional copy
-	return f.relay(ctx, conn, proxyConn)
-}
-
-// relay performs bidirectional data transfer
-func (f *TCPForwarder) relay(ctx context.Context, local, remote net.Conn) error {
-	errCh := make(chan error, 2)
-
-	// Local -> Remote
-	go func() {
-		_, err := io.CopyBuffer(remote, local, make([]byte, f.bufferSize))
-		errCh <- err
-	}()
-
-	// Remote -> Local
-	go func() {
-		_, err := io.CopyBuffer(local, remote, make([]byte, f.bufferSize))
-		errCh <- err
-	}()
-
-	// Wait for either direction to complete or context to cancel
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		// One direction completed, wait briefly for the other
-		return err
-	}
+	return bidirectionalCopy(ctx, conn, proxyConn, f.bufferSize)
 }

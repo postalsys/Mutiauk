@@ -1,18 +1,14 @@
 package route
 
 import (
-	"encoding/json"
-	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"sync"
 
-	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 )
 
-// Route represents a routing entry
+// Route represents a routing entry.
 type Route struct {
 	Destination *net.IPNet `json:"destination"`
 	Gateway     net.IP     `json:"gateway,omitempty"`
@@ -22,238 +18,128 @@ type Route struct {
 	Enabled     bool       `json:"enabled"`
 }
 
-// Manager handles route operations
+// Manager coordinates route operations between the kernel routing table and persistent state.
 type Manager struct {
-	mu        sync.RWMutex
-	tunName   string
-	stateFile string
-	link      netlink.Link
-	logger    *zap.Logger
+	mu     sync.RWMutex
+	kernel *KernelRoutes
+	state  *StateStore
+	logger *zap.Logger
 }
 
-// NewManager creates a new route manager
+// NewManager creates a new route manager for the given TUN interface.
 func NewManager(tunName string, logger *zap.Logger) (*Manager, error) {
-	m := &Manager{
-		tunName:   tunName,
-		stateFile: filepath.Join("/var/lib/mutiauk", "routes.json"),
-		logger:    logger,
-	}
-
-	// Try to get the link (may not exist yet if daemon not running)
-	link, err := netlink.LinkByName(tunName)
-	if err == nil {
-		m.link = link
-	}
-
-	return m, nil
+	return &Manager{
+		kernel: NewKernelRoutes(tunName),
+		state:  NewStateStore(filepath.Join("/var/lib/mutiauk", "routes.json")),
+		logger: logger,
+	}, nil
 }
 
-// SetStateFile sets the state file path
+// SetStateFile sets the state file path.
 func (m *Manager) SetStateFile(path string) {
-	m.stateFile = path
+	m.state.SetPath(path)
 }
 
-// refreshLink refreshes the link reference
+// refreshLink refreshes the netlink reference (used internally and by tests).
 func (m *Manager) refreshLink() error {
-	link, err := netlink.LinkByName(m.tunName)
-	if err != nil {
-		return fmt.Errorf("failed to get link %s: %w", m.tunName, err)
-	}
-	m.link = link
-	return nil
+	return m.kernel.RefreshLink()
 }
 
-// Add adds a route (idempotent)
+// Add adds a route to both the kernel and persistent state (idempotent).
 func (m *Manager) Add(r Route) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.refreshLink(); err != nil {
+	if err := m.kernel.RefreshLink(); err != nil {
 		return err
 	}
 
-	// Check if route already exists
-	routes, err := netlink.RouteList(m.link, netlink.FAMILY_ALL)
+	added, err := m.kernel.Add(r)
 	if err != nil {
-		return fmt.Errorf("failed to list routes: %w", err)
+		return err
 	}
 
-	for _, existing := range routes {
-		if existing.Dst != nil && existing.Dst.String() == r.Destination.String() {
-			// Route already exists
-			m.logger.Debug("route already exists", zap.String("destination", r.Destination.String()))
-			return nil
-		}
+	if added {
+		m.logger.Info("added route",
+			zap.String("destination", r.Destination.String()),
+			zap.String("interface", m.kernel.TUNName()),
+		)
+	} else {
+		m.logger.Debug("route already exists",
+			zap.String("destination", r.Destination.String()),
+		)
 	}
 
-	// Add the route
-	nlRoute := &netlink.Route{
-		LinkIndex: m.link.Attrs().Index,
-		Dst:       r.Destination,
-		Scope:     netlink.SCOPE_LINK,
-	}
-
-	if r.Gateway != nil {
-		nlRoute.Gw = r.Gateway
-		nlRoute.Scope = netlink.SCOPE_UNIVERSE
-	}
-
-	if r.Metric > 0 {
-		nlRoute.Priority = r.Metric
-	}
-
-	if err := netlink.RouteAdd(nlRoute); err != nil {
-		return fmt.Errorf("failed to add route: %w", err)
-	}
-
-	m.logger.Info("added route",
-		zap.String("destination", r.Destination.String()),
-		zap.String("interface", m.tunName),
-	)
-
-	// Save state
-	return m.saveState(r, true)
+	r.Interface = m.kernel.TUNName()
+	return m.state.AddRoute(r)
 }
 
-// Remove removes a route (idempotent)
+// Remove removes a route from both the kernel and persistent state (idempotent).
 func (m *Manager) Remove(r Route) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := m.refreshLink(); err != nil {
-		// If link doesn't exist, route is effectively removed
+	// Try to refresh link, but proceed even if it fails
+	if err := m.kernel.RefreshLink(); err != nil {
 		m.logger.Debug("link not found, route considered removed")
-		return m.saveState(r, false)
+		return m.state.RemoveRoute(r)
 	}
 
-	nlRoute := &netlink.Route{
-		LinkIndex: m.link.Attrs().Index,
-		Dst:       r.Destination,
+	removed, err := m.kernel.Remove(r)
+	if err != nil {
+		return err
 	}
 
-	if err := netlink.RouteDel(nlRoute); err != nil {
-		// Check if route doesn't exist (not an error for idempotent operation)
-		if os.IsNotExist(err) || err.Error() == "no such process" {
-			m.logger.Debug("route already removed", zap.String("destination", r.Destination.String()))
-			return m.saveState(r, false)
-		}
-		return fmt.Errorf("failed to remove route: %w", err)
+	if removed {
+		m.logger.Info("removed route",
+			zap.String("destination", r.Destination.String()),
+		)
+	} else {
+		m.logger.Debug("route already removed",
+			zap.String("destination", r.Destination.String()),
+		)
 	}
 
-	m.logger.Info("removed route", zap.String("destination", r.Destination.String()))
-	return m.saveState(r, false)
+	return m.state.RemoveRoute(r)
 }
 
-// List returns routes managed by this agent
+// List returns routes from persistent state.
 func (m *Manager) List() ([]Route, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Load state file
-	state, err := m.loadState()
+	state, err := m.state.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 
-	var routes []Route
+	routes := make([]Route, 0, len(state))
 	for _, r := range state {
-		r.Interface = m.tunName
+		r.Interface = m.kernel.TUNName()
 		routes = append(routes, r)
 	}
 
 	return routes, nil
 }
 
-// ListKernel returns all routes for the TUN interface from the kernel
+// ListKernel returns all routes for the TUN interface from the kernel.
 func (m *Manager) ListKernel() ([]Route, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if err := m.refreshLink(); err != nil {
+	if err := m.kernel.RefreshLink(); err != nil {
 		return nil, nil // No link, no routes
 	}
 
-	nlRoutes, err := netlink.RouteList(m.link, netlink.FAMILY_ALL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list routes: %w", err)
-	}
-
-	var routes []Route
-	for _, nlr := range nlRoutes {
-		if nlr.Dst == nil {
-			continue
-		}
-		routes = append(routes, Route{
-			Destination: nlr.Dst,
-			Gateway:     nlr.Gw,
-			Interface:   m.tunName,
-			Metric:      nlr.Priority,
-			Enabled:     true,
-		})
-	}
-
-	return routes, nil
+	return m.kernel.List()
 }
 
-// State represents saved route state
-type State map[string]Route
-
-// saveState saves route state to file
-func (m *Manager) saveState(r Route, add bool) error {
-	state, err := m.loadState()
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if state == nil {
-		state = make(State)
-	}
-
-	key := r.Destination.String()
-	if add {
-		r.Interface = m.tunName
-		r.Enabled = true
-		state[key] = r
-	} else {
-		delete(state, key)
-	}
-
-	// Ensure directory exists
-	dir := filepath.Dir(m.stateFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create state directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal state: %w", err)
-	}
-
-	if err := os.WriteFile(m.stateFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write state file: %w", err)
-	}
-
-	return nil
-}
-
-// loadState loads route state from file
+// loadState loads route state from file (internal use and conflict detection).
 func (m *Manager) loadState() (State, error) {
-	data, err := os.ReadFile(m.stateFile)
-	if err != nil {
-		return nil, err
-	}
-
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to parse state file: %w", err)
-	}
-
-	return state, nil
+	return m.state.Load()
 }
 
-// Sync synchronizes routes to match desired state
+// Sync synchronizes routes to match desired state.
 func (m *Manager) Sync(desired []Route) error {
 	plan, err := m.Diff(desired)
 	if err != nil {

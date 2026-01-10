@@ -7,7 +7,6 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/postalsys/mutiauk/internal/api"
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/route"
 	"github.com/spf13/cobra"
@@ -45,27 +44,21 @@ Use --persist to also save the route to the config file.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cidr := args[0]
 
-			// Validate CIDR
 			_, _, err := net.ParseCIDR(cidr)
 			if err != nil {
 				return fmt.Errorf("invalid CIDR: %w", err)
 			}
 
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			// Try to use daemon API if running
-			client := api.NewClient(cfg.Daemon.SocketPath)
-			if client.IsRunning() {
-				result, err := client.RouteAdd(cidr, comment, persist)
-				if err != nil {
-					return fmt.Errorf("failed to add route via daemon: %w", err)
-				}
-				if !result.Success {
-					return fmt.Errorf("failed to add route: %s", result.Message)
-				}
+			// Try daemon API first
+			daemonClient := newDaemonAPIClient(cfg)
+			if result, err := daemonClient.AddRoute(cidr, comment, persist); err != nil {
+				return err
+			} else if result != nil {
 				fmt.Printf("Added route: %s\n", cidr)
 				if result.Persisted {
 					fmt.Printf("Saved to config: %s\n", cfgFile)
@@ -74,38 +67,7 @@ Use --persist to also save the route to the config file.`,
 			}
 
 			// Fallback to direct kernel manipulation
-			_, ipNet, _ := net.ParseCIDR(cidr)
-
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
-			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
-			}
-
-			r := route.Route{
-				Destination: ipNet,
-				Comment:     comment,
-				Enabled:     true,
-			}
-
-			if err := mgr.Add(r); err != nil {
-				return fmt.Errorf("failed to add route: %w", err)
-			}
-
-			fmt.Printf("Added route: %s\n", ipNet.String())
-
-			if persist {
-				cfg.Routes = append(cfg.Routes, config.RouteConfig{
-					Destination: cidr,
-					Comment:     comment,
-					Enabled:     true,
-				})
-				if err := cfg.Save(cfgFile); err != nil {
-					return fmt.Errorf("route added but failed to save config: %w", err)
-				}
-				fmt.Printf("Saved to config: %s\n", cfgFile)
-			}
-
-			return nil
+			return addRouteDirect(cfg, cidr, comment, persist)
 		},
 	}
 
@@ -113,6 +75,41 @@ Use --persist to also save the route to the config file.`,
 	cmd.Flags().BoolVar(&persist, "persist", false, "save route to config file")
 
 	return cmd
+}
+
+func addRouteDirect(cfg *config.Config, cidr, comment string, persist bool) error {
+	_, ipNet, _ := net.ParseCIDR(cidr)
+
+	mgr, err := newRouteManager(cfg)
+	if err != nil {
+		return err
+	}
+
+	r := route.Route{
+		Destination: ipNet,
+		Comment:     comment,
+		Enabled:     true,
+	}
+
+	if err := mgr.Add(r); err != nil {
+		return fmt.Errorf("failed to add route: %w", err)
+	}
+
+	fmt.Printf("Added route: %s\n", ipNet.String())
+
+	if persist {
+		cfg.Routes = append(cfg.Routes, config.RouteConfig{
+			Destination: cidr,
+			Comment:     comment,
+			Enabled:     true,
+		})
+		if err := cfg.Save(cfgFile); err != nil {
+			return fmt.Errorf("route added but failed to save config: %w", err)
+		}
+		fmt.Printf("Saved to config: %s\n", cfgFile)
+	}
+
+	return nil
 }
 
 func newRouteRemoveCmd() *cobra.Command {
@@ -128,27 +125,21 @@ Use --persist to also remove the route from the config file.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cidr := args[0]
 
-			// Validate CIDR
 			_, _, err := net.ParseCIDR(cidr)
 			if err != nil {
 				return fmt.Errorf("invalid CIDR: %w", err)
 			}
 
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			// Try to use daemon API if running
-			client := api.NewClient(cfg.Daemon.SocketPath)
-			if client.IsRunning() {
-				result, err := client.RouteRemove(cidr, persist)
-				if err != nil {
-					return fmt.Errorf("failed to remove route via daemon: %w", err)
-				}
-				if !result.Success {
-					return fmt.Errorf("failed to remove route: %s", result.Message)
-				}
+			// Try daemon API first
+			daemonClient := newDaemonAPIClient(cfg)
+			if result, err := daemonClient.RemoveRoute(cidr, persist); err != nil {
+				return err
+			} else if result != nil {
 				fmt.Printf("Removed route: %s\n", cidr)
 				if result.Persisted {
 					fmt.Printf("Removed from config: %s\n", cfgFile)
@@ -157,44 +148,47 @@ Use --persist to also remove the route from the config file.`,
 			}
 
 			// Fallback to direct kernel manipulation
-			_, ipNet, _ := net.ParseCIDR(cidr)
-
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
-			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
-			}
-
-			r := route.Route{
-				Destination: ipNet,
-			}
-
-			if err := mgr.Remove(r); err != nil {
-				return fmt.Errorf("failed to remove route: %w", err)
-			}
-
-			fmt.Printf("Removed route: %s\n", ipNet.String())
-
-			if persist {
-				// Remove from config
-				for i, rc := range cfg.Routes {
-					if rc.Destination == cidr {
-						cfg.Routes = append(cfg.Routes[:i], cfg.Routes[i+1:]...)
-						break
-					}
-				}
-				if err := cfg.Save(cfgFile); err != nil {
-					return fmt.Errorf("route removed but failed to save config: %w", err)
-				}
-				fmt.Printf("Removed from config: %s\n", cfgFile)
-			}
-
-			return nil
+			return removeRouteDirect(cfg, cidr, persist)
 		},
 	}
 
 	cmd.Flags().BoolVar(&persist, "persist", false, "remove route from config file")
 
 	return cmd
+}
+
+func removeRouteDirect(cfg *config.Config, cidr string, persist bool) error {
+	_, ipNet, _ := net.ParseCIDR(cidr)
+
+	mgr, err := newRouteManager(cfg)
+	if err != nil {
+		return err
+	}
+
+	r := route.Route{
+		Destination: ipNet,
+	}
+
+	if err := mgr.Remove(r); err != nil {
+		return fmt.Errorf("failed to remove route: %w", err)
+	}
+
+	fmt.Printf("Removed route: %s\n", ipNet.String())
+
+	if persist {
+		for i, rc := range cfg.Routes {
+			if rc.Destination == cidr {
+				cfg.Routes = append(cfg.Routes[:i], cfg.Routes[i+1:]...)
+				break
+			}
+		}
+		if err := cfg.Save(cfgFile); err != nil {
+			return fmt.Errorf("route removed but failed to save config: %w", err)
+		}
+		fmt.Printf("Removed from config: %s\n", cfgFile)
+	}
+
+	return nil
 }
 
 func newRouteListCmd() *cobra.Command {
@@ -204,14 +198,14 @@ func newRouteListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List managed routes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
+			mgr, err := newRouteManager(cfg)
 			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
+				return err
 			}
 
 			routes, err := mgr.List()
@@ -249,32 +243,19 @@ func newRoutePlanCmd() *cobra.Command {
 		Use:   "plan",
 		Short: "Show pending route changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
+			mgr, err := newRouteManager(cfg)
 			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
+				return err
 			}
 
-			// Convert config routes to route.Route slice
-			var desired []route.Route
-			for _, r := range cfg.Routes {
-				if !r.Enabled {
-					continue
-				}
-				_, ipNet, err := net.ParseCIDR(r.Destination)
-				if err != nil {
-					return fmt.Errorf("invalid route in config: %s: %w", r.Destination, err)
-				}
-				desired = append(desired, route.Route{
-					Destination: ipNet,
-					Interface:   cfg.TUN.Name,
-					Comment:     r.Comment,
-					Enabled:     r.Enabled,
-				})
+			desired, err := configRoutesToRoutes(cfg)
+			if err != nil {
+				return err
 			}
 
 			plan, err := mgr.Diff(desired)
@@ -287,22 +268,25 @@ func newRoutePlanCmd() *cobra.Command {
 				return nil
 			}
 
-			if len(plan.ToAdd) > 0 {
-				fmt.Println("Routes to add:")
-				for _, r := range plan.ToAdd {
-					fmt.Printf("  + %s\n", r.Destination.String())
-				}
-			}
-
-			if len(plan.ToRemove) > 0 {
-				fmt.Println("Routes to remove:")
-				for _, r := range plan.ToRemove {
-					fmt.Printf("  - %s\n", r.Destination.String())
-				}
-			}
-
+			printRoutePlan(plan)
 			return nil
 		},
+	}
+}
+
+func printRoutePlan(plan *route.Plan) {
+	if len(plan.ToAdd) > 0 {
+		fmt.Println("Routes to add:")
+		for _, r := range plan.ToAdd {
+			fmt.Printf("  + %s\n", r.Destination.String())
+		}
+	}
+
+	if len(plan.ToRemove) > 0 {
+		fmt.Println("Routes to remove:")
+		for _, r := range plan.ToRemove {
+			fmt.Printf("  - %s\n", r.Destination.String())
+		}
 	}
 }
 
@@ -313,32 +297,19 @@ func newRouteApplyCmd() *cobra.Command {
 		Use:   "apply",
 		Short: "Apply routes from configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
+			mgr, err := newRouteManager(cfg)
 			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
+				return err
 			}
 
-			// Convert config routes to route.Route slice
-			var desired []route.Route
-			for _, r := range cfg.Routes {
-				if !r.Enabled {
-					continue
-				}
-				_, ipNet, err := net.ParseCIDR(r.Destination)
-				if err != nil {
-					return fmt.Errorf("invalid route in config: %s: %w", r.Destination, err)
-				}
-				desired = append(desired, route.Route{
-					Destination: ipNet,
-					Interface:   cfg.TUN.Name,
-					Comment:     r.Comment,
-					Enabled:     r.Enabled,
-				})
+			desired, err := configRoutesToRoutes(cfg)
+			if err != nil {
+				return err
 			}
 
 			plan, err := mgr.Diff(desired)
@@ -353,12 +324,7 @@ func newRouteApplyCmd() *cobra.Command {
 
 			if dryRun {
 				fmt.Println("Dry run - would apply:")
-				for _, r := range plan.ToAdd {
-					fmt.Printf("  + %s\n", r.Destination.String())
-				}
-				for _, r := range plan.ToRemove {
-					fmt.Printf("  - %s\n", r.Destination.String())
-				}
+				printRoutePlan(plan)
 				return nil
 			}
 
@@ -381,28 +347,19 @@ func newRouteCheckCmd() *cobra.Command {
 		Use:   "check",
 		Short: "Check for route conflicts",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			mgr, err := route.NewManager(cfg.TUN.Name, GetLogger())
+			mgr, err := newRouteManager(cfg)
 			if err != nil {
-				return fmt.Errorf("failed to create route manager: %w", err)
+				return err
 			}
 
-			// Convert config routes to route.Route slice
-			var routes []route.Route
-			for _, r := range cfg.Routes {
-				_, ipNet, err := net.ParseCIDR(r.Destination)
-				if err != nil {
-					return fmt.Errorf("invalid route in config: %s: %w", r.Destination, err)
-				}
-				routes = append(routes, route.Route{
-					Destination: ipNet,
-					Comment:     r.Comment,
-					Enabled:     r.Enabled,
-				})
+			routes, err := configRoutesToRoutesAll(cfg)
+			if err != nil {
+				return err
 			}
 
 			conflicts, err := mgr.DetectConflicts(routes)

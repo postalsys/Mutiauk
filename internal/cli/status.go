@@ -15,7 +15,6 @@ import (
 	"github.com/postalsys/mutiauk/internal/api"
 	"github.com/postalsys/mutiauk/internal/config"
 	"github.com/postalsys/mutiauk/internal/daemon"
-	"github.com/postalsys/mutiauk/internal/route"
 	"github.com/postalsys/mutiauk/internal/socks5"
 	"github.com/spf13/cobra"
 )
@@ -87,9 +86,9 @@ func newStatusCmd() *cobra.Command {
 Use --skip-tests to skip connectivity tests (faster).
 Use --json for machine-readable output.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			result := gatherStatus(cfg, skipConnTests)
@@ -140,7 +139,6 @@ func checkDaemonStatus(cfg *config.Config) DaemonStatus {
 			status.Uptime = apiStatus.Uptime
 			status.Message = fmt.Sprintf("running (PID %d)", apiStatus.PID)
 
-			// Check if CLI config matches daemon config
 			if apiStatus.ConfigPath != cfgFile {
 				status.ConfigMismatch = true
 			}
@@ -154,7 +152,6 @@ func checkDaemonStatus(cfg *config.Config) DaemonStatus {
 		return status
 	}
 
-	// Check if process is actually running
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		status.Message = "not running (stale PID file)"
@@ -185,7 +182,6 @@ func checkTUNStatus(cfg *config.Config) TUNStatus {
 		return status
 	}
 
-	// Check if interface exists using ip command
 	out, err := exec.Command("ip", "link", "show", cfg.TUN.Name).Output()
 	if err != nil {
 		return status
@@ -196,7 +192,6 @@ func checkTUNStatus(cfg *config.Config) TUNStatus {
 		status.Message = "up"
 	}
 
-	// Get IP address
 	out, err = exec.Command("ip", "-4", "addr", "show", cfg.TUN.Name).Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -225,40 +220,16 @@ func getSocks5Config(cfg *config.Config) SOCKS5Status {
 func checkRoutesStatus(cfg *config.Config) []RouteStatus {
 	routes := make([]RouteStatus, 0)
 
-	// Get managed routes from route manager
-	log := GetLogger()
-	mgr, err := route.NewManager(cfg.TUN.Name, log)
+	mgr, err := newRouteManager(cfg)
 	if err != nil {
-		// Can't check routes, return config routes as inactive
-		for _, r := range cfg.Routes {
-			if r.Enabled {
-				routes = append(routes, RouteStatus{
-					Destination: r.Destination,
-					Active:      false,
-					Comment:     r.Comment,
-				})
-			}
-		}
-		return routes
+		return configRoutesToStatus(cfg)
 	}
 
-	// Get actual routes
 	activeRoutes, err := mgr.List()
 	if err != nil {
-		// Return config routes as inactive
-		for _, r := range cfg.Routes {
-			if r.Enabled {
-				routes = append(routes, RouteStatus{
-					Destination: r.Destination,
-					Active:      false,
-					Comment:     r.Comment,
-				})
-			}
-		}
-		return routes
+		return configRoutesToStatus(cfg)
 	}
 
-	// Create map of active routes
 	activeMap := make(map[string]bool)
 	for _, r := range activeRoutes {
 		if r.Destination != nil {
@@ -266,7 +237,6 @@ func checkRoutesStatus(cfg *config.Config) []RouteStatus {
 		}
 	}
 
-	// Check each config route
 	for _, r := range cfg.Routes {
 		if r.Enabled {
 			routes = append(routes, RouteStatus{
@@ -280,22 +250,34 @@ func checkRoutesStatus(cfg *config.Config) []RouteStatus {
 	return routes
 }
 
+func configRoutesToStatus(cfg *config.Config) []RouteStatus {
+	routes := make([]RouteStatus, 0)
+	for _, r := range cfg.Routes {
+		if r.Enabled {
+			routes = append(routes, RouteStatus{
+				Destination: r.Destination,
+				Active:      false,
+				Comment:     r.Comment,
+			})
+		}
+	}
+	return routes
+}
+
 func runConnectivityTests(cfg *config.Config) ConnectivityStatus {
 	status := ConnectivityStatus{}
 
-	// Test 1: SOCKS5 server reachable (TCP connection)
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", cfg.SOCKS5.Server, 5*time.Second)
 	if err != nil {
 		status.SOCKS5Reachable = false
 		status.SOCKS5Error = err.Error()
-		return status // No point testing further if we can't reach SOCKS5
+		return status
 	}
 	conn.Close()
 	status.SOCKS5Reachable = true
 	status.SOCKS5Latency = fmt.Sprintf("%dms", time.Since(start).Milliseconds())
 
-	// Create SOCKS5 client for further tests
 	var auth socks5.Authenticator
 	if cfg.HasAuth() {
 		auth = &socks5.UserPassAuth{
@@ -305,7 +287,6 @@ func runConnectivityTests(cfg *config.Config) ConnectivityStatus {
 	}
 	client := socks5.NewClient(cfg.SOCKS5.Server, auth, cfg.SOCKS5.Timeout, cfg.SOCKS5.KeepAlive)
 
-	// Test 2: TCP routing through SOCKS5
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -318,7 +299,6 @@ func runConnectivityTests(cfg *config.Config) ConnectivityStatus {
 		status.TCPRouting = true
 	}
 
-	// Test 3: UDP routing through SOCKS5
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
 
@@ -348,7 +328,6 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 	fmt.Println("==============")
 	fmt.Println()
 
-	// Daemon status
 	daemonInfo := result.Daemon.Message
 	if result.Daemon.Uptime != "" {
 		daemonInfo += fmt.Sprintf(", uptime %s", result.Daemon.Uptime)
@@ -358,7 +337,6 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		fmt.Printf("Config:        %s\n", result.Daemon.ConfigPath)
 	}
 
-	// TUN interface
 	tunInfo := result.TUN.Name
 	if result.TUN.Address != "" {
 		tunInfo = fmt.Sprintf("%s (%s)", result.TUN.Name, result.TUN.Address)
@@ -369,14 +347,12 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		fmt.Printf("TUN Interface: %s - %s\n", result.TUN.Name, result.TUN.Message)
 	}
 
-	// SOCKS5 server
 	socks5Info := result.SOCKS5.Server
 	if result.SOCKS5.Auth {
 		socks5Info += " (with auth)"
 	}
 	fmt.Printf("SOCKS5 Server: %s\n", socks5Info)
 
-	// Routes
 	fmt.Println()
 	fmt.Println("Routes:")
 	if len(result.Routes) == 0 {
@@ -392,11 +368,9 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		}
 	}
 
-	// Connectivity tests
 	fmt.Println()
 	fmt.Println("Connectivity:")
 
-	// SOCKS5 connection
 	if result.Connectivity.SOCKS5Reachable {
 		fmt.Printf("  SOCKS5 Connection: OK (%s)\n", result.Connectivity.SOCKS5Latency)
 	} else if result.Connectivity.SOCKS5Error != "" {
@@ -405,7 +379,6 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		fmt.Println("  SOCKS5 Connection: (not tested)")
 	}
 
-	// TCP routing
 	if result.Connectivity.TCPRouting {
 		fmt.Println("  TCP Routing:       OK")
 	} else if result.Connectivity.TCPError != "" {
@@ -414,7 +387,6 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		fmt.Println("  TCP Routing:       (not tested)")
 	}
 
-	// UDP routing
 	if result.Connectivity.UDPRouting {
 		fmt.Println("  UDP Routing:       OK")
 	} else if result.Connectivity.UDPError != "" {
@@ -423,7 +395,6 @@ func printHumanStatus(result *StatusResult, cfg *config.Config) error {
 		fmt.Println("  UDP Routing:       (not tested)")
 	}
 
-	// Summary
 	fmt.Println()
 	if result.Daemon.ConfigMismatch {
 		fmt.Printf("Warning: CLI config (%s) differs from daemon config (%s)\n", cfgFile, result.Daemon.ConfigPath)

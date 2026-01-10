@@ -108,6 +108,18 @@ func (a *Address) ToUDPAddr() *net.UDPAddr {
 	}
 }
 
+// NewAddressFromUDPAddr creates an Address from a net.UDPAddr.
+// If addr is nil or has no IP, returns a zero address (0.0.0.0:0).
+func NewAddressFromUDPAddr(addr *net.UDPAddr) *Address {
+	if addr == nil || addr.IP == nil {
+		return &Address{Type: AddrTypeIPv4, IP: net.IPv4zero, Port: 0}
+	}
+	if ip4 := addr.IP.To4(); ip4 != nil {
+		return &Address{Type: AddrTypeIPv4, IP: ip4, Port: uint16(addr.Port)}
+	}
+	return &Address{Type: AddrTypeIPv6, IP: addr.IP, Port: uint16(addr.Port)}
+}
+
 // ToTCPAddr converts the address to a net.TCPAddr
 func (a *Address) ToTCPAddr() *net.TCPAddr {
 	return &net.TCPAddr{

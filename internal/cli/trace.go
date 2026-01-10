@@ -46,48 +46,22 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			destination := args[0]
 
-			cfg, err := config.Load(cfgFile)
+			cfg, err := loadConfig()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
 			logger := GetLogger()
 
-			// Lookup kernel route
 			lookup, err := route.ResolveAndLookup(destination, cfg.TUN.Name)
 			if err != nil {
 				return err
 			}
 
-			result := &TraceResult{
-				Destination:  destination,
-				ResolvedIP:   lookup.ResolvedIP.String(),
-				MatchedRoute: lookup.MatchedRoute.String(),
-				Interface:    lookup.Interface,
-				IsMutiauk:    lookup.IsMutiauk,
-			}
+			result := buildTraceResult(destination, lookup)
 
-			if lookup.Gateway != nil && !lookup.Gateway.IsUnspecified() {
-				result.Gateway = lookup.Gateway.String()
-			}
-
-			// If routed through Mutiauk, get mesh path
 			if lookup.IsMutiauk && cfg.AutoRoutes.URL != "" {
-				client := autoroutes.NewClient(
-					cfg.AutoRoutes.URL,
-					cfg.AutoRoutes.Timeout,
-					logger,
-				)
-
-				path, err := client.LookupPath(cmd.Context(), lookup.ResolvedIP)
-				if err != nil {
-					logger.Warn("failed to lookup mesh path", zap.Error(err))
-				} else if path != nil {
-					result.MeshPath = path.PathDisplay
-					result.Origin = path.Origin
-					result.OriginID = path.OriginID
-					result.HopCount = path.HopCount
-				}
+				populateMeshPath(cmd, cfg, lookup, result, logger)
 			}
 
 			if jsonOutput {
@@ -96,7 +70,6 @@ Examples:
 				return enc.Encode(result)
 			}
 
-			// Human-readable output
 			printTraceResult(result)
 			return nil
 		},
@@ -104,6 +77,38 @@ Examples:
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	return cmd
+}
+
+func buildTraceResult(destination string, lookup *route.LookupResult) *TraceResult {
+	result := &TraceResult{
+		Destination:  destination,
+		ResolvedIP:   lookup.ResolvedIP.String(),
+		MatchedRoute: lookup.MatchedRoute.String(),
+		Interface:    lookup.Interface,
+		IsMutiauk:    lookup.IsMutiauk,
+	}
+
+	if lookup.Gateway != nil && !lookup.Gateway.IsUnspecified() {
+		result.Gateway = lookup.Gateway.String()
+	}
+
+	return result
+}
+
+func populateMeshPath(cmd *cobra.Command, cfg *config.Config, lookup *route.LookupResult, result *TraceResult, logger *zap.Logger) {
+	client := autoroutes.NewClient(cfg.AutoRoutes.URL, cfg.AutoRoutes.Timeout, logger)
+
+	path, err := client.LookupPath(cmd.Context(), lookup.ResolvedIP)
+	if err != nil {
+		logger.Warn("failed to lookup mesh path", zap.Error(err))
+		return
+	}
+	if path != nil {
+		result.MeshPath = path.PathDisplay
+		result.Origin = path.Origin
+		result.OriginID = path.OriginID
+		result.HopCount = path.HopCount
+	}
 }
 
 func printTraceResult(r *TraceResult) {

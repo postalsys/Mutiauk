@@ -198,123 +198,46 @@ func (c *Client) handshake(conn net.Conn) error {
 	return nil
 }
 
-// sendConnect sends a CONNECT request
-func (c *Client) sendConnect(conn net.Conn, target *Address) error {
-	// Build CONNECT request
-	// +----+-----+-------+------+----------+----------+
-	// |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-	// +----+-----+-------+------+----------+----------+
-	// | 1  |  1  | X'00' |  1   | Variable |    2     |
-	// +----+-----+-------+------+----------+----------+
-	addrBytes, err := target.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	req := make([]byte, 3+len(addrBytes))
-	req[0] = Version
-	req[1] = CmdConnect
-	req[2] = 0x00 // Reserved
-	copy(req[3:], addrBytes)
-
-	if _, err := conn.Write(req); err != nil {
-		return fmt.Errorf("failed to send connect request: %w", err)
-	}
-
-	// Read response
-	return c.readReply(conn)
-}
-
-// sendUDPAssociate sends a UDP ASSOCIATE request
-func (c *Client) sendUDPAssociate(conn net.Conn, localAddr *net.UDPAddr) (*Address, error) {
-	// Build UDP ASSOCIATE request
-	// Client tells server which address/port it will send UDP from
-	// If not known, use 0.0.0.0:0
-	var addr *Address
-	if localAddr != nil && localAddr.IP != nil {
-		if ip4 := localAddr.IP.To4(); ip4 != nil {
-			addr = &Address{
-				Type: AddrTypeIPv4,
-				IP:   ip4,
-				Port: uint16(localAddr.Port),
-			}
-		} else {
-			addr = &Address{
-				Type: AddrTypeIPv6,
-				IP:   localAddr.IP,
-				Port: uint16(localAddr.Port),
-			}
-		}
-	} else {
-		addr = &Address{
-			Type: AddrTypeIPv4,
-			IP:   net.IPv4zero,
-			Port: 0,
-		}
-	}
-
+// sendRequest sends a SOCKS5 request with the given command and address.
+// Returns the bound address from the reply.
+func (c *Client) sendRequest(conn net.Conn, cmd byte, addr *Address) (*Address, error) {
 	addrBytes, err := addr.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 
+	// Build request: VER | CMD | RSV | ATYP | DST.ADDR | DST.PORT
 	req := make([]byte, 3+len(addrBytes))
 	req[0] = Version
-	req[1] = CmdUDPAssociate
+	req[1] = cmd
 	req[2] = 0x00 // Reserved
 	copy(req[3:], addrBytes)
 
 	if _, err := conn.Write(req); err != nil {
-		return nil, fmt.Errorf("failed to send udp associate request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// Read response and get relay address
-	return c.readReplyWithAddr(conn)
+	return c.readReply(conn)
 }
 
-// readReply reads a SOCKS5 reply
-func (c *Client) readReply(conn net.Conn) error {
+// sendConnect sends a CONNECT request
+func (c *Client) sendConnect(conn net.Conn, target *Address) error {
+	_, err := c.sendRequest(conn, CmdConnect, target)
+	return err
+}
+
+// sendUDPAssociate sends a UDP ASSOCIATE request
+func (c *Client) sendUDPAssociate(conn net.Conn, localAddr *net.UDPAddr) (*Address, error) {
+	return c.sendRequest(conn, CmdUDPAssociate, NewAddressFromUDPAddr(localAddr))
+}
+
+// readReply reads a SOCKS5 reply and returns the bound address.
+// The address is always read from the connection to maintain protocol state.
+func (c *Client) readReply(conn net.Conn) (*Address, error) {
 	// Read reply header
 	// +----+-----+-------+------+----------+----------+
 	// |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 	// +----+-----+-------+------+----------+----------+
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return fmt.Errorf("failed to read reply header: %w", err)
-	}
-
-	if header[0] != Version {
-		return fmt.Errorf("unexpected SOCKS version in reply: %d", header[0])
-	}
-
-	if header[1] != ReplySucceeded {
-		return &Error{
-			Code:    header[1],
-			Message: ReplyMessage(header[1]),
-		}
-	}
-
-	// Read and discard bound address
-	switch header[3] {
-	case AddrTypeIPv4:
-		discard := make([]byte, 4+2)
-		io.ReadFull(conn, discard)
-	case AddrTypeIPv6:
-		discard := make([]byte, 16+2)
-		io.ReadFull(conn, discard)
-	case AddrTypeDomain:
-		lenBuf := make([]byte, 1)
-		io.ReadFull(conn, lenBuf)
-		discard := make([]byte, int(lenBuf[0])+2)
-		io.ReadFull(conn, discard)
-	}
-
-	return nil
-}
-
-// readReplyWithAddr reads a SOCKS5 reply and returns the bound address
-func (c *Client) readReplyWithAddr(conn net.Conn) (*Address, error) {
-	// Read reply header
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, fmt.Errorf("failed to read reply header: %w", err)
@@ -331,12 +254,11 @@ func (c *Client) readReplyWithAddr(conn net.Conn) (*Address, error) {
 		}
 	}
 
-	// Read bound address
 	addr := &Address{Type: header[3]}
 
 	switch addr.Type {
 	case AddrTypeIPv4:
-		buf := make([]byte, 4+2)
+		buf := make([]byte, 6)
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			return nil, fmt.Errorf("failed to read IPv4 address: %w", err)
 		}
@@ -345,7 +267,7 @@ func (c *Client) readReplyWithAddr(conn net.Conn) (*Address, error) {
 		addr.Port = uint16(buf[4])<<8 | uint16(buf[5])
 
 	case AddrTypeIPv6:
-		buf := make([]byte, 16+2)
+		buf := make([]byte, 18)
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			return nil, fmt.Errorf("failed to read IPv6 address: %w", err)
 		}

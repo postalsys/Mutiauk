@@ -21,33 +21,63 @@ import (
 	"go.uber.org/zap"
 )
 
-// Server is the main daemon server
-type Server struct {
-	cfg        *config.Config
-	configPath string // Path to config file we were started with
-	logger     *zap.Logger
-	startTime  time.Time
+// routeState manages both config and auto routes with unified locking
+type routeState struct {
+	mu         sync.RWMutex
+	autoRoutes []route.Route
+}
 
+func (rs *routeState) setAutoRoutes(routes []route.Route) {
+	rs.mu.Lock()
+	rs.autoRoutes = routes
+	rs.mu.Unlock()
+}
+
+func (rs *routeState) getAutoRoutes() []route.Route {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+
+	if rs.autoRoutes == nil {
+		return nil
+	}
+	result := make([]route.Route, len(rs.autoRoutes))
+	copy(result, rs.autoRoutes)
+	return result
+}
+
+func (rs *routeState) autoRouteCount() int {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return len(rs.autoRoutes)
+}
+
+// networkStack holds all network-related components
+type networkStack struct {
 	tunDev          tun.Device
 	netStack        *stack.Stack
 	natTable        *nat.Table
-	routeMgr        *route.Manager
 	socks5Client    *socks5.Client
 	tcpForwarder    *proxy.TCPForwarder
 	udpForwarder    *proxy.UDPForwarder
 	rawUDPForwarder *proxy.RawUDPForwarder
+}
 
-	// API server for CLI communication
-	apiServer *api.Server
+// Server is the main daemon server
+type Server struct {
+	cfg        *config.Config
+	configPath string
+	logger     *zap.Logger
 
-	// Autoroutes polling
-	autoPoller   *autoroutes.Poller
-	autoRoutes   []route.Route
-	autoRoutesMu sync.RWMutex
+	mu        sync.RWMutex
+	running   bool
+	startTime time.Time
+	cancelFn  context.CancelFunc
 
-	mu       sync.RWMutex
-	running  bool
-	cancelFn context.CancelFunc
+	network    networkStack
+	routeMgr   *route.Manager
+	routeState routeState
+	apiServer  *api.Server
+	autoPoller *autoroutes.Poller
 }
 
 // New creates a new daemon server
@@ -61,61 +91,26 @@ func New(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, er
 
 // Run starts the daemon server
 func (s *Server) Run(ctx context.Context) error {
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		return fmt.Errorf("server already running")
+	if err := s.setRunning(true); err != nil {
+		return err
 	}
-	s.running = true
-	s.startTime = time.Now()
-	s.mu.Unlock()
+	defer s.setRunning(false)
 
-	defer func() {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-	}()
-
-	// Create cancellable context
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancelFn = cancel
 	defer cancel()
 
-	// Write PID file
 	if err := s.writePIDFile(); err != nil {
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 	defer s.removePIDFile()
 
-	// Initialize components
 	if err := s.initialize(); err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 	defer s.cleanup()
 
-	// Start API server for CLI communication
-	if s.cfg.Daemon.SocketPath != "" {
-		s.apiServer = api.NewServer(s.cfg.Daemon.SocketPath, s, s.logger)
-		if err := s.apiServer.Start(ctx); err != nil {
-			s.logger.Warn("failed to start API server", zap.Error(err))
-		}
-	}
-
-	// Apply routes from config
-	if err := s.applyRoutes(); err != nil {
-		s.logger.Warn("failed to apply some routes", zap.Error(err))
-	}
-
-	// Start autoroutes polling if enabled
-	if s.cfg.AutoRoutes.Enabled {
-		s.startAutoRoutes(ctx)
-	}
-
-	// Start NAT garbage collection
-	s.natTable.StartGC(ctx, nat.GCConfig{
-		Interval: s.cfg.NAT.GCInterval,
-		Logger:   s.logger,
-	})
+	s.startServices(ctx)
 
 	s.logger.Info("daemon started",
 		zap.String("tun", s.cfg.TUN.Name),
@@ -123,15 +118,68 @@ func (s *Server) Run(ctx context.Context) error {
 		zap.Bool("autoroutes", s.cfg.AutoRoutes.Enabled),
 	)
 
-	// Run the network stack (blocks until context cancelled)
-	return s.netStack.Run(ctx)
+	return s.network.netStack.Run(ctx)
+}
+
+// setRunning atomically sets the running state
+func (s *Server) setRunning(running bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if running && s.running {
+		return fmt.Errorf("server already running")
+	}
+	s.running = running
+	if running {
+		s.startTime = time.Now()
+	}
+	return nil
+}
+
+// startServices starts API server, routes, autoroutes poller, and NAT GC
+func (s *Server) startServices(ctx context.Context) {
+	if s.cfg.Daemon.SocketPath != "" {
+		s.apiServer = api.NewServer(s.cfg.Daemon.SocketPath, s, s.logger)
+		if err := s.apiServer.Start(ctx); err != nil {
+			s.logger.Warn("failed to start API server", zap.Error(err))
+		}
+	}
+
+	if err := s.syncRoutes(); err != nil {
+		s.logger.Warn("failed to apply some routes", zap.Error(err))
+	}
+
+	if s.cfg.AutoRoutes.Enabled {
+		s.startAutoRoutes(ctx)
+	}
+
+	s.network.natTable.StartGC(ctx, nat.GCConfig{
+		Interval: s.cfg.NAT.GCInterval,
+		Logger:   s.logger,
+	})
 }
 
 // initialize sets up all components
 func (s *Server) initialize() error {
-	var err error
+	tunCfg, err := s.parseTUNConfig()
+	if err != nil {
+		return err
+	}
 
-	// Parse TUN addresses
+	if err := s.initNetwork(tunCfg); err != nil {
+		return err
+	}
+
+	s.routeMgr, err = route.NewManager(s.cfg.TUN.Name, s.logger)
+	if err != nil {
+		return fmt.Errorf("failed to create route manager: %w", err)
+	}
+
+	return nil
+}
+
+// parseTUNConfig parses TUN configuration from config
+func (s *Server) parseTUNConfig() (tun.Config, error) {
 	tunCfg := tun.Config{
 		Name:    s.cfg.TUN.Name,
 		MTU:     s.cfg.TUN.MTU,
@@ -141,7 +189,7 @@ func (s *Server) initialize() error {
 	if s.cfg.TUN.Address != "" {
 		ip, ipNet, err := net.ParseCIDR(s.cfg.TUN.Address)
 		if err != nil {
-			return fmt.Errorf("invalid TUN address: %w", err)
+			return tunCfg, fmt.Errorf("invalid TUN address: %w", err)
 		}
 		tunCfg.Address = ip
 		tunCfg.Netmask = ipNet.Mask
@@ -150,46 +198,41 @@ func (s *Server) initialize() error {
 	if s.cfg.TUN.Address6 != "" {
 		ip, ipNet, err := net.ParseCIDR(s.cfg.TUN.Address6)
 		if err != nil {
-			return fmt.Errorf("invalid TUN IPv6 address: %w", err)
+			return tunCfg, fmt.Errorf("invalid TUN IPv6 address: %w", err)
 		}
 		tunCfg.Address6 = ip
 		tunCfg.Netmask6 = ipNet.Mask
 	}
 
-	// Create TUN device
-	s.tunDev, err = tun.New(tunCfg)
+	return tunCfg, nil
+}
+
+// initNetwork initializes all network components
+func (s *Server) initNetwork(tunCfg tun.Config) error {
+	var err error
+
+	s.network.tunDev, err = tun.New(tunCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create TUN device: %w", err)
 	}
-	s.logger.Info("TUN device created", zap.String("name", s.tunDev.Name()))
+	s.logger.Info("TUN device created", zap.String("name", s.network.tunDev.Name()))
 
-	// Create NAT table
-	s.natTable = nat.NewTable(nat.Config{
+	s.network.natTable = nat.NewTable(nat.Config{
 		MaxEntries: s.cfg.NAT.TableSize,
 		TCPTTL:     s.cfg.NAT.TCPTimeout,
 		UDPTTL:     s.cfg.NAT.UDPTimeout,
 	})
 
-	// Create SOCKS5 client
-	auth := socks5.NewAuthenticator(s.cfg.SOCKS5.Username, s.cfg.SOCKS5.Password)
-	s.socks5Client = socks5.NewClient(
-		s.cfg.SOCKS5.Server,
-		auth,
-		s.cfg.SOCKS5.Timeout,
-		s.cfg.SOCKS5.KeepAlive,
-	)
+	s.network.socks5Client = s.createSOCKS5Client()
+	s.network.tcpForwarder = proxy.NewTCPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
+	s.network.udpForwarder = proxy.NewUDPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
+	s.network.rawUDPForwarder = proxy.NewRawUDPForwarder(s.network.socks5Client, s.logger)
 
-	// Create forwarders
-	s.tcpForwarder = proxy.NewTCPForwarder(s.socks5Client, s.natTable, s.logger)
-	s.udpForwarder = proxy.NewUDPForwarder(s.socks5Client, s.natTable, s.logger)
-	s.rawUDPForwarder = proxy.NewRawUDPForwarder(s.socks5Client, s.logger)
-
-	// Create network stack
 	stackCfg := stack.Config{
 		MTU:           s.cfg.TUN.MTU,
-		TCPHandler:    s.tcpForwarder,
-		UDPHandler:    s.udpForwarder,
-		RawUDPHandler: s.rawUDPForwarder,
+		TCPHandler:    s.network.tcpForwarder,
+		UDPHandler:    s.network.udpForwarder,
+		RawUDPHandler: s.network.rawUDPForwarder,
 		Logger:        s.logger,
 	}
 
@@ -202,18 +245,23 @@ func (s *Server) initialize() error {
 		stackCfg.IPv6Mask = tunCfg.Netmask6
 	}
 
-	s.netStack, err = stack.New(s.tunDev, stackCfg)
+	s.network.netStack, err = stack.New(s.network.tunDev, stackCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create network stack: %w", err)
 	}
 
-	// Create route manager
-	s.routeMgr, err = route.NewManager(s.cfg.TUN.Name, s.logger)
-	if err != nil {
-		return fmt.Errorf("failed to create route manager: %w", err)
-	}
-
 	return nil
+}
+
+// createSOCKS5Client creates a SOCKS5 client from current config
+func (s *Server) createSOCKS5Client() *socks5.Client {
+	auth := socks5.NewAuthenticator(s.cfg.SOCKS5.Username, s.cfg.SOCKS5.Password)
+	return socks5.NewClient(
+		s.cfg.SOCKS5.Server,
+		auth,
+		s.cfg.SOCKS5.Timeout,
+		s.cfg.SOCKS5.KeepAlive,
+	)
 }
 
 // cleanup closes all components
@@ -221,14 +269,14 @@ func (s *Server) cleanup() {
 	if s.apiServer != nil {
 		s.apiServer.Stop()
 	}
-	if s.netStack != nil {
-		s.netStack.Close()
+	if s.network.netStack != nil {
+		s.network.netStack.Close()
 	}
-	if s.tunDev != nil {
-		s.tunDev.Close()
+	if s.network.tunDev != nil {
+		s.network.tunDev.Close()
 	}
-	if s.natTable != nil {
-		s.natTable.Clear()
+	if s.network.natTable != nil {
+		s.network.natTable.Clear()
 	}
 }
 
@@ -256,11 +304,9 @@ func (s *Server) startAutoRoutes(ctx context.Context) {
 
 // onAutoRoutesUpdate is called when new autoroutes are fetched
 func (s *Server) onAutoRoutesUpdate(routes []route.Route) {
-	s.autoRoutesMu.Lock()
-	s.autoRoutes = routes
-	s.autoRoutesMu.Unlock()
+	s.routeState.setAutoRoutes(routes)
 
-	if err := s.applyAllRoutes(); err != nil {
+	if err := s.syncRoutes(); err != nil {
 		s.logger.Warn("failed to apply autoroutes", zap.Error(err))
 	}
 }
@@ -294,26 +340,20 @@ func (s *Server) getConfigRoutes() []route.Route {
 	return routes
 }
 
-// applyRoutes applies routes from configuration only (no autoroutes)
-func (s *Server) applyRoutes() error {
-	return s.routeMgr.Sync(s.getConfigRoutes())
-}
-
-// applyAllRoutes applies both config routes and autoroutes
-func (s *Server) applyAllRoutes() error {
+// syncRoutes synchronizes all routes (config + auto) with the system
+func (s *Server) syncRoutes() error {
 	configRoutes := s.getConfigRoutes()
+	autoRoutes := s.routeState.getAutoRoutes()
 
-	s.autoRoutesMu.RLock()
-	autoRoutesCopy := make([]route.Route, len(s.autoRoutes))
-	copy(autoRoutesCopy, s.autoRoutes)
-	s.autoRoutesMu.RUnlock()
+	if len(autoRoutes) == 0 {
+		return s.routeMgr.Sync(configRoutes)
+	}
 
-	// Merge routes: config routes take precedence
-	combined := autoroutes.MergeRoutes(configRoutes, autoRoutesCopy)
+	combined := autoroutes.MergeRoutes(configRoutes, autoRoutes)
 
 	s.logger.Debug("applying routes",
 		zap.Int("config_routes", len(configRoutes)),
-		zap.Int("auto_routes", len(autoRoutesCopy)),
+		zap.Int("auto_routes", len(autoRoutes)),
 		zap.Int("combined", len(combined)),
 	)
 
@@ -325,38 +365,32 @@ func (s *Server) Reload(cfg *config.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Update SOCKS5 client if server changed
-	if cfg.SOCKS5.Server != s.cfg.SOCKS5.Server ||
-		cfg.SOCKS5.Username != s.cfg.SOCKS5.Username ||
-		cfg.SOCKS5.Password != s.cfg.SOCKS5.Password {
-
-		auth := socks5.NewAuthenticator(cfg.SOCKS5.Username, cfg.SOCKS5.Password)
-		s.socks5Client = socks5.NewClient(
+	if s.socks5ConfigChanged(cfg) {
+		s.network.socks5Client = socks5.NewClient(
 			cfg.SOCKS5.Server,
-			auth,
+			socks5.NewAuthenticator(cfg.SOCKS5.Username, cfg.SOCKS5.Password),
 			cfg.SOCKS5.Timeout,
 			cfg.SOCKS5.KeepAlive,
 		)
-		s.tcpForwarder.UpdateClient(s.socks5Client)
-		s.udpForwarder.UpdateClient(s.socks5Client)
+		s.network.tcpForwarder.UpdateClient(s.network.socks5Client)
+		s.network.udpForwarder.UpdateClient(s.network.socks5Client)
 		s.logger.Info("SOCKS5 client updated", zap.String("server", cfg.SOCKS5.Server))
 	}
 
-	// Update config
 	s.cfg = cfg
 
-	// Reapply routes (includes autoroutes if enabled)
-	if s.autoPoller != nil {
-		if err := s.applyAllRoutes(); err != nil {
-			s.logger.Warn("failed to reapply routes", zap.Error(err))
-		}
-	} else {
-		if err := s.applyRoutes(); err != nil {
-			s.logger.Warn("failed to reapply routes", zap.Error(err))
-		}
+	if err := s.syncRoutes(); err != nil {
+		s.logger.Warn("failed to reapply routes", zap.Error(err))
 	}
 
 	return nil
+}
+
+// socks5ConfigChanged checks if SOCKS5 configuration has changed
+func (s *Server) socks5ConfigChanged(cfg *config.Config) bool {
+	return cfg.SOCKS5.Server != s.cfg.SOCKS5.Server ||
+		cfg.SOCKS5.Username != s.cfg.SOCKS5.Username ||
+		cfg.SOCKS5.Password != s.cfg.SOCKS5.Password
 }
 
 // Stop stops the daemon server
@@ -399,9 +433,7 @@ func (s *Server) GetStatus() *api.StatusResult {
 	startTime := s.startTime
 	s.mu.RUnlock()
 
-	s.autoRoutesMu.RLock()
-	autoRouteCount := len(s.autoRoutes)
-	s.autoRoutesMu.RUnlock()
+	autoRouteCount := s.routeState.autoRouteCount()
 
 	result := &api.StatusResult{
 		Running:      running,
@@ -434,7 +466,6 @@ func (s *Server) GetStatus() *api.StatusResult {
 func (s *Server) GetRoutes() []api.RouteInfo {
 	var routes []api.RouteInfo
 
-	// Config routes
 	for _, r := range s.cfg.Routes {
 		routes = append(routes, api.RouteInfo{
 			Destination: r.Destination,
@@ -445,9 +476,7 @@ func (s *Server) GetRoutes() []api.RouteInfo {
 		})
 	}
 
-	// Auto routes
-	s.autoRoutesMu.RLock()
-	for _, r := range s.autoRoutes {
+	for _, r := range s.routeState.getAutoRoutes() {
 		routes = append(routes, api.RouteInfo{
 			Destination: r.Destination.String(),
 			Interface:   s.cfg.TUN.Name,
@@ -456,7 +485,6 @@ func (s *Server) GetRoutes() []api.RouteInfo {
 			Enabled:     true,
 		})
 	}
-	s.autoRoutesMu.RUnlock()
 
 	return routes
 }
@@ -509,7 +537,6 @@ func (s *Server) RemoveRoute(dest string, persist bool) error {
 	}
 
 	if persist {
-		// Remove from config
 		for i, rc := range s.cfg.Routes {
 			if rc.Destination == dest {
 				s.cfg.Routes = append(s.cfg.Routes[:i], s.cfg.Routes[i+1:]...)
@@ -543,7 +570,6 @@ func (s *Server) TraceRoute(dest string) (*api.RouteTraceResult, error) {
 		result.Gateway = lookup.Gateway.String()
 	}
 
-	// If routed through Mutiauk and autoroutes enabled, lookup mesh path
 	if lookup.IsMutiauk && s.cfg.AutoRoutes.URL != "" {
 		client := autoroutes.NewClient(
 			s.cfg.AutoRoutes.URL,
@@ -568,23 +594,4 @@ func (s *Server) TraceRoute(dest string) (*api.RouteTraceResult, error) {
 // GetConfigPath returns the config file path
 func (s *Server) GetConfigPath() string {
 	return s.configPath
-}
-
-// formatUptime formats duration as human-readable string
-func formatUptime(d time.Duration) string {
-	d = d.Round(time.Second)
-
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	sec := d / time.Second
-
-	if h > 0 {
-		return fmt.Sprintf("%dh %dm %ds", h, m, sec)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm %ds", m, sec)
-	}
-	return fmt.Sprintf("%ds", sec)
 }
