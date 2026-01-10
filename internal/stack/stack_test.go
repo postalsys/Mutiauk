@@ -7,6 +7,7 @@ import (
 	"net"
 	"testing"
 
+	"go.uber.org/zap"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
@@ -485,5 +486,282 @@ func TestBuildUDPResponse_RoundTrip(t *testing.T) {
 	udpPayload := pkt[int(ipHdrLen)+header.UDPMinimumSize:]
 	if string(udpPayload) != string(payload) {
 		t.Errorf("payload = %q, want %q", udpPayload, payload)
+	}
+}
+
+// --- interceptEndpoint Tests ---
+
+func TestNewInterceptEndpoint(t *testing.T) {
+	var writeCallCount int
+	tunWriter := func(data []byte) (int, error) {
+		writeCallCount++
+		return len(data), nil
+	}
+
+	mockHandler := &mockUDPPacketHandler{}
+	logger := zap.NewNop()
+
+	// Using nil for inner endpoint since we're testing the wrapper
+	ep := newInterceptEndpoint(nil, mockHandler, tunWriter, logger)
+
+	if ep == nil {
+		t.Fatal("newInterceptEndpoint returned nil")
+	}
+	if ep.udpHandler != mockHandler {
+		t.Error("udpHandler not set correctly")
+	}
+	if ep.tunWriter == nil {
+		t.Error("tunWriter not set")
+	}
+	if ep.logger != logger {
+		t.Error("logger not set correctly")
+	}
+}
+
+func TestInterceptEndpoint_WriteRawPacket(t *testing.T) {
+	var writtenData []byte
+	tunWriter := func(data []byte) (int, error) {
+		writtenData = make([]byte, len(data))
+		copy(writtenData, data)
+		return len(data), nil
+	}
+
+	ep := newInterceptEndpoint(nil, nil, tunWriter, zap.NewNop())
+
+	testData := []byte("test packet data")
+	err := ep.WriteRawPacket(testData)
+
+	if err != nil {
+		t.Errorf("WriteRawPacket error = %v", err)
+	}
+	if string(writtenData) != string(testData) {
+		t.Errorf("written data = %q, want %q", writtenData, testData)
+	}
+}
+
+func TestInterceptEndpoint_WriteRawPacket_Error(t *testing.T) {
+	expectedErr := net.ErrClosed
+	tunWriter := func(data []byte) (int, error) {
+		return 0, expectedErr
+	}
+
+	ep := newInterceptEndpoint(nil, nil, tunWriter, zap.NewNop())
+
+	err := ep.WriteRawPacket([]byte("test"))
+
+	if err != expectedErr {
+		t.Errorf("WriteRawPacket error = %v, want %v", err, expectedErr)
+	}
+}
+
+// --- Config with Handlers Tests ---
+
+func TestConfig_WithHandlers(t *testing.T) {
+	tcpHandler := &mockTCPHandler{}
+	udpHandler := &mockUDPHandler{}
+	rawUDPHandler := &mockRawUDPHandler{}
+
+	cfg := Config{
+		MTU:           1400,
+		IPv4Addr:      net.ParseIP("10.200.200.1"),
+		IPv4Mask:      net.CIDRMask(24, 32),
+		TCPHandler:    tcpHandler,
+		UDPHandler:    udpHandler,
+		RawUDPHandler: rawUDPHandler,
+		Logger:        zap.NewNop(),
+	}
+
+	if cfg.TCPHandler == nil {
+		t.Error("TCPHandler should not be nil")
+	}
+	if cfg.UDPHandler == nil {
+		t.Error("UDPHandler should not be nil")
+	}
+	if cfg.RawUDPHandler == nil {
+		t.Error("RawUDPHandler should not be nil")
+	}
+	if cfg.Logger == nil {
+		t.Error("Logger should not be nil")
+	}
+}
+
+func TestConfig_IPv6(t *testing.T) {
+	cfg := Config{
+		IPv6Addr: net.ParseIP("fd00::1"),
+		IPv6Mask: net.CIDRMask(64, 128),
+	}
+
+	if cfg.IPv6Addr == nil {
+		t.Error("IPv6Addr should not be nil")
+	}
+
+	ones, bits := cfg.IPv6Mask.Size()
+	if ones != 64 || bits != 128 {
+		t.Errorf("IPv6Mask = /%d (bits=%d), want /64 (bits=128)", ones, bits)
+	}
+}
+
+// --- checksum edge cases ---
+
+func TestChecksum_MaxData(t *testing.T) {
+	// Test with data that produces maximum checksum value
+	data := []byte{0xFF, 0xFF}
+	result := checksum(data, 0)
+
+	if result != 0xFFFF {
+		t.Errorf("checksum = 0x%04x, want 0xFFFF", result)
+	}
+}
+
+func TestChecksum_MultipleOverflows(t *testing.T) {
+	// Test with data that causes multiple carry-overs
+	data := make([]byte, 10)
+	for i := range data {
+		data[i] = 0xFF
+	}
+
+	// Should not panic and should return valid result
+	result := checksum(data, 0)
+
+	// Result should be 0xFFFF due to folding
+	if result != 0xFFFF {
+		t.Errorf("checksum = 0x%04x, want 0xFFFF", result)
+	}
+}
+
+func TestChecksum_InitialMaxValue(t *testing.T) {
+	data := []byte{0x00, 0x01}
+	initial := uint16(0xFFFF)
+	result := checksum(data, initial)
+
+	// 0xFFFF + 0x0001 = 0x10000 -> fold to 0x0001
+	expected := uint16(0x0001)
+	if result != expected {
+		t.Errorf("checksum = 0x%04x, want 0x%04x", result, expected)
+	}
+}
+
+// --- BuildUDPResponse edge cases ---
+
+func TestBuildUDPResponse_MaxPayload(t *testing.T) {
+	srcIP := net.ParseIP("10.0.0.1").To4()
+	dstIP := net.ParseIP("10.0.0.2").To4()
+
+	// UDP max payload is 65535 - 8 (UDP header) = 65527
+	// But with IP header (20 bytes), practical max is smaller
+	// Test with a reasonable large payload
+	payload := make([]byte, 8192)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	pkt := BuildUDPResponse(srcIP, dstIP, 1234, 5678, payload)
+
+	// Verify packet was created correctly
+	expectedLen := header.IPv4MinimumSize + header.UDPMinimumSize + len(payload)
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+
+	// Verify IP total length
+	ipHdr := header.IPv4(pkt)
+	if ipHdr.TotalLength() != uint16(expectedLen) {
+		t.Errorf("IP total length = %d, want %d", ipHdr.TotalLength(), expectedLen)
+	}
+}
+
+func TestBuildUDPResponse_BinaryPayload(t *testing.T) {
+	srcIP := net.ParseIP("1.1.1.1").To4()
+	dstIP := net.ParseIP("2.2.2.2").To4()
+
+	// Create payload with all byte values
+	payload := make([]byte, 256)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	pkt := BuildUDPResponse(srcIP, dstIP, 53, 53, payload)
+
+	// Verify payload integrity
+	gotPayload := pkt[header.IPv4MinimumSize+header.UDPMinimumSize:]
+	for i := range payload {
+		if gotPayload[i] != payload[i] {
+			t.Errorf("payload[%d] = %d, want %d", i, gotPayload[i], payload[i])
+			break
+		}
+	}
+}
+
+// --- Stack interface verification ---
+
+func TestStack_ImplementsClose(t *testing.T) {
+	// Verify Stack has Close method
+	s := &Stack{}
+	err := s.Close()
+	// Should not panic, may return nil
+	_ = err
+}
+
+// --- Benchmark Tests ---
+
+func BenchmarkBuildUDPResponse_SmallPayload(b *testing.B) {
+	srcIP := net.ParseIP("10.0.0.1").To4()
+	dstIP := net.ParseIP("10.0.0.2").To4()
+	payload := []byte("small")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildUDPResponse(srcIP, dstIP, 1234, 5678, payload)
+	}
+}
+
+func BenchmarkBuildUDPResponse_MediumPayload(b *testing.B) {
+	srcIP := net.ParseIP("10.0.0.1").To4()
+	dstIP := net.ParseIP("10.0.0.2").To4()
+	payload := make([]byte, 512)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildUDPResponse(srcIP, dstIP, 1234, 5678, payload)
+	}
+}
+
+func BenchmarkBuildUDPResponse_LargePayload(b *testing.B) {
+	srcIP := net.ParseIP("10.0.0.1").To4()
+	dstIP := net.ParseIP("10.0.0.2").To4()
+	payload := make([]byte, 4096)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildUDPResponse(srcIP, dstIP, 1234, 5678, payload)
+	}
+}
+
+func BenchmarkChecksum_Small(b *testing.B) {
+	data := make([]byte, 20)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = checksum(data, 0)
+	}
+}
+
+func BenchmarkChecksum_Large(b *testing.B) {
+	data := make([]byte, 1500)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = checksum(data, 0)
+	}
+}
+
+func BenchmarkNewInterceptEndpoint(b *testing.B) {
+	tunWriter := func(data []byte) (int, error) { return len(data), nil }
+	handler := &mockUDPPacketHandler{}
+	logger := zap.NewNop()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = newInterceptEndpoint(nil, handler, tunWriter, logger)
 	}
 }
