@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.7](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.6...mutiauk-v0.2.7) (2026-01-10)
+
+
+### Features
+
+* **wizard:** add autoroutes configuration option ([dbbf443](https://github.com/postalsys/Mutiauk/commit/dbbf443a114f2e1309cbb4082b5c142583d5f500))
+
+
+### Bug Fixes
+
+* docker-test environment configuration ([06f0c27](https://github.com/postalsys/Mutiauk/commit/06f0c2716da06170bd263c1e943302366e2d80b1))
+
 ## [0.2.6](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.5...mutiauk-v0.2.6) (2026-01-09)
 
 
