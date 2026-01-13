@@ -501,8 +501,8 @@ func TestNewInterceptEndpoint(t *testing.T) {
 	mockHandler := &mockUDPPacketHandler{}
 	logger := zap.NewNop()
 
-	// Using nil for inner endpoint since we're testing the wrapper
-	ep := newInterceptEndpoint(nil, mockHandler, tunWriter, logger)
+	// Using nil for inner endpoint and ICMP handler since we're testing the wrapper
+	ep := newInterceptEndpoint(nil, mockHandler, nil, tunWriter, logger)
 
 	if ep == nil {
 		t.Fatal("newInterceptEndpoint returned nil")
@@ -526,7 +526,7 @@ func TestInterceptEndpoint_WriteRawPacket(t *testing.T) {
 		return len(data), nil
 	}
 
-	ep := newInterceptEndpoint(nil, nil, tunWriter, zap.NewNop())
+	ep := newInterceptEndpoint(nil, nil, nil, tunWriter, zap.NewNop())
 
 	testData := []byte("test packet data")
 	err := ep.WriteRawPacket(testData)
@@ -545,7 +545,7 @@ func TestInterceptEndpoint_WriteRawPacket_Error(t *testing.T) {
 		return 0, expectedErr
 	}
 
-	ep := newInterceptEndpoint(nil, nil, tunWriter, zap.NewNop())
+	ep := newInterceptEndpoint(nil, nil, nil, tunWriter, zap.NewNop())
 
 	err := ep.WriteRawPacket([]byte("test"))
 
@@ -762,6 +762,6 @@ func BenchmarkNewInterceptEndpoint(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = newInterceptEndpoint(nil, handler, tunWriter, logger)
+		_ = newInterceptEndpoint(nil, handler, nil, tunWriter, logger)
 	}
 }

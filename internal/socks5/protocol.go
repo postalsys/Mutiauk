@@ -22,6 +22,7 @@ const (
 	CmdConnect      byte = 0x01 // CONNECT
 	CmdBind         byte = 0x02 // BIND
 	CmdUDPAssociate byte = 0x03 // UDP ASSOCIATE
+	CmdICMPEcho     byte = 0x04 // ICMP Echo (Muti Metroo extension)
 )
 
 // Address types
@@ -33,13 +34,13 @@ const (
 
 // Reply codes
 const (
-	ReplySucceeded          byte = 0x00
-	ReplyGeneralFailure     byte = 0x01
-	ReplyNotAllowed         byte = 0x02
-	ReplyNetworkUnreachable byte = 0x03
-	ReplyHostUnreachable    byte = 0x04
-	ReplyConnectionRefused  byte = 0x05
-	ReplyTTLExpired         byte = 0x06
+	ReplySucceeded           byte = 0x00
+	ReplyGeneralFailure      byte = 0x01
+	ReplyNotAllowed          byte = 0x02
+	ReplyNetworkUnreachable  byte = 0x03
+	ReplyHostUnreachable     byte = 0x04
+	ReplyConnectionRefused   byte = 0x05
+	ReplyTTLExpired          byte = 0x06
 	ReplyCommandNotSupported byte = 0x07
 	ReplyAddressNotSupported byte = 0x08
 )

@@ -60,6 +60,7 @@ type networkStack struct {
 	tcpForwarder    *proxy.TCPForwarder
 	udpForwarder    *proxy.UDPForwarder
 	rawUDPForwarder *proxy.RawUDPForwarder
+	icmpForwarder   *proxy.ICMPForwarder
 }
 
 // Server is the main daemon server
@@ -227,12 +228,14 @@ func (s *Server) initNetwork(tunCfg tun.Config) error {
 	s.network.tcpForwarder = proxy.NewTCPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
 	s.network.udpForwarder = proxy.NewUDPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
 	s.network.rawUDPForwarder = proxy.NewRawUDPForwarder(s.network.socks5Client, s.logger)
+	s.network.icmpForwarder = proxy.NewICMPForwarder(s.network.socks5Client, s.logger, s.cfg.SOCKS5.Timeout)
 
 	stackCfg := stack.Config{
 		MTU:           s.cfg.TUN.MTU,
 		TCPHandler:    s.network.tcpForwarder,
 		UDPHandler:    s.network.udpForwarder,
 		RawUDPHandler: s.network.rawUDPForwarder,
+		ICMPHandler:   s.network.icmpForwarder,
 		Logger:        s.logger,
 	}
 
@@ -268,6 +271,9 @@ func (s *Server) createSOCKS5Client() *socks5.Client {
 func (s *Server) cleanup() {
 	if s.apiServer != nil {
 		s.apiServer.Stop()
+	}
+	if s.network.icmpForwarder != nil {
+		s.network.icmpForwarder.Close()
 	}
 	if s.network.netStack != nil {
 		s.network.netStack.Close()

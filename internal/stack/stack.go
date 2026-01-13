@@ -48,6 +48,18 @@ type RawUDPHandler interface {
 	HandleRawUDP(ctx context.Context, srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) ([]byte, error)
 }
 
+// ICMPHandler handles ICMP echo requests
+type ICMPHandler interface {
+	// HandleICMP sends an ICMP echo request through the proxy and returns the reply.
+	// srcIP: original source (client)
+	// dstIP: destination to ping
+	// id: ICMP identifier
+	// seq: ICMP sequence number
+	// payload: ICMP payload data
+	// Returns the reply payload or error
+	HandleICMP(ctx context.Context, srcIP, dstIP net.IP, id, seq uint16, payload []byte) ([]byte, error)
+}
+
 // Config holds stack configuration
 type Config struct {
 	MTU           int
@@ -58,6 +70,7 @@ type Config struct {
 	TCPHandler    TCPHandler
 	UDPHandler    UDPHandler    // Old interface
 	RawUDPHandler RawUDPHandler // New interface for intercepted UDP
+	ICMPHandler   ICMPHandler   // ICMP echo handler
 	Logger        *zap.Logger
 }
 
@@ -108,8 +121,8 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 		return nil, fmt.Errorf("failed to create link endpoint: %w", err)
 	}
 
-	// Wrap with intercept endpoint to capture UDP packets
-	s.interceptEP = newInterceptEndpoint(baseLinkEP, s, tunDev.Write, cfg.Logger)
+	// Wrap with intercept endpoint to capture UDP and ICMP packets
+	s.interceptEP = newInterceptEndpoint(baseLinkEP, s, s, tunDev.Write, cfg.Logger)
 	s.linkEP = s.interceptEP
 
 	// Create NIC with intercept endpoint
@@ -242,6 +255,55 @@ func (s *Stack) HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, pa
 	}()
 }
 
+// HandleICMPPacket implements ICMPPacketHandler for the intercept endpoint
+func (s *Stack) HandleICMPPacket(srcIP, dstIP net.IP, id, seq uint16, payload []byte) {
+	s.logger.Debug("ICMP packet received for forwarding",
+		zap.String("src", srcIP.String()),
+		zap.String("dst", dstIP.String()),
+		zap.Uint16("id", id),
+		zap.Uint16("seq", seq),
+		zap.Int("payload_len", len(payload)),
+	)
+
+	if s.cfg.ICMPHandler == nil {
+		s.logger.Debug("no ICMPHandler configured, dropping ICMP packet")
+		return
+	}
+
+	// Forward through SOCKS5 in a goroutine to not block
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		response, err := s.cfg.ICMPHandler.HandleICMP(ctx, srcIP, dstIP, id, seq, payload)
+		if err != nil {
+			s.logger.Debug("ICMP forward failed",
+				zap.String("dst", dstIP.String()),
+				zap.Error(err),
+			)
+			return
+		}
+
+		if len(response) == 0 {
+			return
+		}
+
+		// Build ICMP echo reply packet: from dstIP to srcIP
+		replyPkt := BuildICMPEchoReply(dstIP, srcIP, id, seq, response)
+
+		// Write response back to TUN
+		if _, err := s.tunDev.Write(replyPkt); err != nil {
+			s.logger.Error("failed to write ICMP response to TUN",
+				zap.Error(err),
+			)
+		} else {
+			s.logger.Debug("ICMP response written to TUN",
+				zap.Int("len", len(replyPkt)),
+			)
+		}
+	}()
+}
+
 // handleTCPForward handles a forwarded TCP connection
 func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 	id := r.ID()
@@ -309,7 +371,6 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 		conn.Close()
 	}
 }
-
 
 // Close shuts down the stack
 func (s *Stack) Close() error {

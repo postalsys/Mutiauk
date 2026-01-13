@@ -2,9 +2,11 @@ package socks5
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -142,6 +144,55 @@ func (c *Client) UDPAssociate(ctx context.Context, localAddr *net.UDPAddr) (*UDP
 		controlConn: conn,
 		relayConn:   udpConn,
 		relayAddr:   relayAddr,
+	}, nil
+}
+
+// ICMPAssociate establishes an ICMP echo relay through the SOCKS5 proxy.
+// This is a Muti Metroo extension (command 0x04).
+// After successful handshake, the connection becomes a bidirectional ICMP relay.
+func (c *Client) ICMPAssociate(ctx context.Context, destIP net.IP) (*ICMPRelay, error) {
+	// Connect to SOCKS5 server
+	conn, err := c.dialServer(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set deadline for handshake
+	if c.Timeout > 0 {
+		conn.SetDeadline(time.Now().Add(c.Timeout))
+	}
+
+	// Perform handshake
+	if err := c.handshake(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("handshake failed: %w", err)
+	}
+
+	// Send ICMP Echo request with destination IP
+	// The "port" is ignored for ICMP, but we need to send a valid address
+	addr := &Address{
+		Type: AddrTypeIPv4,
+		IP:   destIP.To4(),
+		Port: 0,
+	}
+	if addr.IP == nil {
+		// IPv6
+		addr.Type = AddrTypeIPv6
+		addr.IP = destIP.To16()
+	}
+
+	_, err = c.sendRequest(conn, CmdICMPEcho, addr)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("icmp associate failed: %w", err)
+	}
+
+	// Clear deadline
+	conn.SetDeadline(time.Time{})
+
+	return &ICMPRelay{
+		conn:   conn,
+		destIP: destIP,
 	}, nil
 }
 
@@ -303,7 +354,7 @@ func (c *Client) readReply(conn net.Conn) (*Address, error) {
 
 // UDPRelay handles UDP forwarding through SOCKS5
 type UDPRelay struct {
-	controlConn net.Conn    // TCP connection to keep UDP association alive
+	controlConn net.Conn     // TCP connection to keep UDP association alive
 	relayConn   *net.UDPConn // UDP connection to relay
 	relayAddr   *Address     // Address of the relay
 }
@@ -388,4 +439,68 @@ func (r *UDPRelay) SetReadDeadline(t time.Time) error {
 func (r *UDPRelay) Close() error {
 	r.relayConn.Close()
 	return r.controlConn.Close()
+}
+
+// ICMPRelay handles ICMP echo relay through SOCKS5.
+// Wire format for echo request (client -> server):
+//
+//	[Identifier:2][Sequence:2][PayloadLen:2][Payload:N]
+//
+// Wire format for echo reply (server -> client):
+//
+//	[Identifier:2][Sequence:2][PayloadLen:2][Payload:N][IsReply:1]
+type ICMPRelay struct {
+	conn   net.Conn
+	destIP net.IP
+	mu     sync.Mutex
+}
+
+// SendEcho sends an ICMP echo request through the relay.
+func (r *ICMPRelay) SendEcho(id, seq uint16, payload []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Build echo request: [ID:2][Seq:2][PayloadLen:2][Payload:N]
+	buf := make([]byte, 6+len(payload))
+	binary.BigEndian.PutUint16(buf[0:2], id)
+	binary.BigEndian.PutUint16(buf[2:4], seq)
+	binary.BigEndian.PutUint16(buf[4:6], uint16(len(payload)))
+	copy(buf[6:], payload)
+
+	_, err := r.conn.Write(buf)
+	return err
+}
+
+// ReceiveEcho receives an ICMP echo reply from the relay.
+// Returns the reply payload and sequence number.
+func (r *ICMPRelay) ReceiveEcho() (payload []byte, seq uint16, err error) {
+	// Read header: [ID:2][Seq:2][PayloadLen:2]
+	header := make([]byte, 6)
+	if _, err := io.ReadFull(r.conn, header); err != nil {
+		return nil, 0, err
+	}
+
+	seq = binary.BigEndian.Uint16(header[2:4])
+	payloadLen := binary.BigEndian.Uint16(header[4:6])
+
+	// Read payload + IsReply byte
+	remaining := make([]byte, payloadLen+1)
+	if _, err := io.ReadFull(r.conn, remaining); err != nil {
+		return nil, seq, err
+	}
+
+	// Payload is everything except the last byte (IsReply flag)
+	payload = remaining[:payloadLen]
+
+	return payload, seq, nil
+}
+
+// SetReadDeadline sets the read deadline on the relay connection.
+func (r *ICMPRelay) SetReadDeadline(t time.Time) error {
+	return r.conn.SetReadDeadline(t)
+}
+
+// Close closes the ICMP relay.
+func (r *ICMPRelay) Close() error {
+	return r.conn.Close()
 }

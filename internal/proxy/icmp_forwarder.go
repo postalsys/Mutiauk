@@ -1,0 +1,218 @@
+package proxy
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/postalsys/mutiauk/internal/socks5"
+	"go.uber.org/zap"
+)
+
+// ICMPForwarder forwards ICMP echo requests through a SOCKS5 proxy.
+type ICMPForwarder struct {
+	client  *socks5.Client
+	logger  *zap.Logger
+	timeout time.Duration
+
+	// Session cache
+	mu       sync.RWMutex
+	sessions map[icmpSessionKey]*icmpSession
+
+	// Shutdown
+	done chan struct{}
+}
+
+// icmpSessionKey uniquely identifies an ICMP session.
+type icmpSessionKey struct {
+	dstIP string
+	id    uint16
+}
+
+// icmpSession represents an active ICMP session through SOCKS5.
+type icmpSession struct {
+	relay    *socks5.ICMPRelay
+	lastUsed time.Time
+	mu       sync.Mutex
+}
+
+// NewICMPForwarder creates a new ICMP forwarder.
+func NewICMPForwarder(client *socks5.Client, logger *zap.Logger, timeout time.Duration) *ICMPForwarder {
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+
+	f := &ICMPForwarder{
+		client:   client,
+		logger:   logger,
+		timeout:  timeout,
+		sessions: make(map[icmpSessionKey]*icmpSession),
+		done:     make(chan struct{}),
+	}
+
+	// Start cleanup goroutine
+	go f.cleanupLoop()
+
+	return f
+}
+
+// HandleICMP implements stack.ICMPHandler.
+// Forwards an ICMP echo request through the SOCKS5 proxy and returns the reply.
+func (f *ICMPForwarder) HandleICMP(ctx context.Context, srcIP, dstIP net.IP, id, seq uint16, payload []byte) ([]byte, error) {
+	f.logger.Debug("forwarding ICMP echo request",
+		zap.String("src", srcIP.String()),
+		zap.String("dst", dstIP.String()),
+		zap.Uint16("id", id),
+		zap.Uint16("seq", seq),
+		zap.Int("payload_len", len(payload)),
+	)
+
+	// Get or create session
+	session, err := f.getOrCreateSession(ctx, dstIP, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ICMP session: %w", err)
+	}
+
+	// Send echo request and wait for reply
+	replyPayload, err := session.sendEcho(ctx, id, seq, payload, f.timeout)
+	if err != nil {
+		return nil, fmt.Errorf("ICMP echo failed: %w", err)
+	}
+
+	return replyPayload, nil
+}
+
+// getOrCreateSession gets an existing session or creates a new one.
+func (f *ICMPForwarder) getOrCreateSession(ctx context.Context, dstIP net.IP, id uint16) (*icmpSession, error) {
+	key := icmpSessionKey{dstIP: dstIP.String(), id: id}
+
+	// Try to get existing session
+	f.mu.RLock()
+	session, exists := f.sessions[key]
+	f.mu.RUnlock()
+
+	if exists {
+		session.mu.Lock()
+		session.lastUsed = time.Now()
+		session.mu.Unlock()
+		return session, nil
+	}
+
+	// Create new session
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if session, exists = f.sessions[key]; exists {
+		session.mu.Lock()
+		session.lastUsed = time.Now()
+		session.mu.Unlock()
+		return session, nil
+	}
+
+	// Create ICMP relay through SOCKS5
+	relay, err := f.client.ICMPAssociate(ctx, dstIP)
+	if err != nil {
+		return nil, err
+	}
+
+	session = &icmpSession{
+		relay:    relay,
+		lastUsed: time.Now(),
+	}
+	f.sessions[key] = session
+
+	f.logger.Debug("created ICMP session",
+		zap.String("dst", dstIP.String()),
+		zap.Uint16("id", id),
+	)
+
+	return session, nil
+}
+
+// sendEcho sends an echo request and waits for the reply.
+func (s *icmpSession) sendEcho(ctx context.Context, id, seq uint16, payload []byte, timeout time.Duration) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastUsed = time.Now()
+
+	// Send echo request
+	if err := s.relay.SendEcho(id, seq, payload); err != nil {
+		return nil, err
+	}
+
+	// Wait for reply with timeout
+	if timeout > 0 {
+		s.relay.SetReadDeadline(time.Now().Add(timeout))
+	}
+
+	// Read reply
+	replyPayload, replySeq, err := s.relay.ReceiveEcho()
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify sequence matches (id is always matched by the server)
+	if replySeq != seq {
+		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", seq, replySeq)
+	}
+
+	return replyPayload, nil
+}
+
+// cleanupLoop periodically removes stale sessions.
+func (f *ICMPForwarder) cleanupLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-f.done:
+			return
+		case <-ticker.C:
+			f.cleanup()
+		}
+	}
+}
+
+// cleanup removes sessions that haven't been used recently.
+func (f *ICMPForwarder) cleanup() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	now := time.Now()
+	staleThreshold := 60 * time.Second
+
+	for key, session := range f.sessions {
+		session.mu.Lock()
+		if now.Sub(session.lastUsed) > staleThreshold {
+			session.relay.Close()
+			delete(f.sessions, key)
+			f.logger.Debug("removed stale ICMP session",
+				zap.String("dst", key.dstIP),
+				zap.Uint16("id", key.id),
+			)
+		}
+		session.mu.Unlock()
+	}
+}
+
+// Close closes all sessions and stops the forwarder.
+func (f *ICMPForwarder) Close() error {
+	// Signal cleanup goroutine to stop
+	close(f.done)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for key, session := range f.sessions {
+		session.relay.Close()
+		delete(f.sessions, key)
+	}
+
+	return nil
+}
+

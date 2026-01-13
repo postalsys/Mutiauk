@@ -15,20 +15,27 @@ type UDPPacketHandler interface {
 	HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte)
 }
 
-// interceptEndpoint wraps a link endpoint to intercept UDP packets
+// ICMPPacketHandler handles intercepted ICMP packets
+type ICMPPacketHandler interface {
+	HandleICMPPacket(srcIP, dstIP net.IP, id, seq uint16, payload []byte)
+}
+
+// interceptEndpoint wraps a link endpoint to intercept UDP and ICMP packets
 type interceptEndpoint struct {
 	stack.LinkEndpoint
 	dispatcher  stack.NetworkDispatcher
 	udpHandler  UDPPacketHandler
+	icmpHandler ICMPPacketHandler
 	tunWriter   func([]byte) (int, error)
 	logger      *zap.Logger
 }
 
 // newInterceptEndpoint creates a new intercepting link endpoint
-func newInterceptEndpoint(inner stack.LinkEndpoint, udpHandler UDPPacketHandler, tunWriter func([]byte) (int, error), logger *zap.Logger) *interceptEndpoint {
+func newInterceptEndpoint(inner stack.LinkEndpoint, udpHandler UDPPacketHandler, icmpHandler ICMPPacketHandler, tunWriter func([]byte) (int, error), logger *zap.Logger) *interceptEndpoint {
 	return &interceptEndpoint{
 		LinkEndpoint: inner,
 		udpHandler:   udpHandler,
+		icmpHandler:  icmpHandler,
 		tunWriter:    tunWriter,
 		logger:       logger,
 	}
@@ -74,8 +81,10 @@ func (d *interceptDispatcher) DeliverNetworkPacket(protocol tcpip.NetworkProtoco
 			return
 		}
 		ipHdr := header.IPv4(data)
+		ipHdrLen := int(ipHdr.HeaderLength())
+
+		// Check for UDP
 		if ipHdr.Protocol() == uint8(header.UDPProtocolNumber) {
-			ipHdrLen := int(ipHdr.HeaderLength())
 			if len(data) >= ipHdrLen+header.UDPMinimumSize {
 				udpHdr := header.UDP(data[ipHdrLen:])
 				payload := data[ipHdrLen+header.UDPMinimumSize:]
@@ -98,52 +107,112 @@ func (d *interceptDispatcher) DeliverNetworkPacket(protocol tcpip.NetworkProtoco
 				return // Don't pass UDP to gVisor - we handle it ourselves
 			}
 		}
-		// Not UDP or malformed, pass to gVisor
+
+		// Check for ICMP Echo Request
+		if ipHdr.Protocol() == uint8(header.ICMPv4ProtocolNumber) {
+			if len(data) >= ipHdrLen+header.ICMPv4MinimumSize {
+				icmpHdr := header.ICMPv4(data[ipHdrLen:])
+				// Only handle Echo Request (Type 8)
+				if icmpHdr.Type() == header.ICMPv4Echo {
+					srcAddr := ipHdr.SourceAddress()
+					dstAddr := ipHdr.DestinationAddress()
+					srcIP := net.IP(srcAddr.AsSlice())
+					dstIP := net.IP(dstAddr.AsSlice())
+					id := icmpHdr.Ident()
+					seq := icmpHdr.Sequence()
+					payload := data[ipHdrLen+header.ICMPv4MinimumSize:]
+
+					d.ep.logger.Debug("intercepted ICMP Echo Request",
+						zap.String("src", srcIP.String()),
+						zap.String("dst", dstIP.String()),
+						zap.Uint16("id", id),
+						zap.Uint16("seq", seq),
+						zap.Int("payload_len", len(payload)),
+					)
+
+					if d.ep.icmpHandler != nil {
+						d.ep.icmpHandler.HandleICMPPacket(srcIP, dstIP, id, seq, payload)
+					}
+					return // Don't pass ICMP to gVisor - we handle it ourselves
+				}
+			}
+		}
+
+		// Not UDP/ICMP or malformed, pass to gVisor
 		d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
 		return
 	}
 
 	ipHdr := header.IPv4(netHdr.Slice())
-
-	// Only intercept UDP
-	if ipHdr.Protocol() != uint8(header.UDPProtocolNumber) {
-		d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
-		return
-	}
-
-	// Get transport header
-	transHdr := pkt.TransportHeader()
-	if transHdr.View().Size() < header.UDPMinimumSize {
-		d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
-		return
-	}
-
-	udpHdr := header.UDP(transHdr.Slice())
 	srcAddr := ipHdr.SourceAddress()
 	dstAddr := ipHdr.DestinationAddress()
 	srcIP := net.IP(srcAddr.AsSlice())
 	dstIP := net.IP(dstAddr.AsSlice())
-	srcPort := udpHdr.SourcePort()
-	dstPort := udpHdr.DestinationPort()
 
-	// Get payload
-	payload := pkt.Data().AsRange().ToSlice()
+	// Handle UDP
+	if ipHdr.Protocol() == uint8(header.UDPProtocolNumber) {
+		// Get transport header
+		transHdr := pkt.TransportHeader()
+		if transHdr.View().Size() < header.UDPMinimumSize {
+			d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
+			return
+		}
 
-	d.ep.logger.Info("intercepted UDP packet",
-		zap.String("src", srcIP.String()),
-		zap.Uint16("src_port", srcPort),
-		zap.String("dst", dstIP.String()),
-		zap.Uint16("dst_port", dstPort),
-		zap.Int("payload_len", len(payload)),
-	)
+		udpHdr := header.UDP(transHdr.Slice())
+		srcPort := udpHdr.SourcePort()
+		dstPort := udpHdr.DestinationPort()
 
-	// Call the UDP handler if set
-	if d.ep.udpHandler != nil {
-		d.ep.udpHandler.HandleUDPPacket(srcIP, dstIP, srcPort, dstPort, payload)
+		// Get payload
+		payload := pkt.Data().AsRange().ToSlice()
+
+		d.ep.logger.Info("intercepted UDP packet",
+			zap.String("src", srcIP.String()),
+			zap.Uint16("src_port", srcPort),
+			zap.String("dst", dstIP.String()),
+			zap.Uint16("dst_port", dstPort),
+			zap.Int("payload_len", len(payload)),
+		)
+
+		// Call the UDP handler if set
+		if d.ep.udpHandler != nil {
+			d.ep.udpHandler.HandleUDPPacket(srcIP, dstIP, srcPort, dstPort, payload)
+		}
+		return // Don't pass UDP to gVisor - we handle it ourselves
 	}
 
-	// Don't pass UDP to gVisor - we handle it ourselves
-	// d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
+	// Handle ICMP Echo Request
+	if ipHdr.Protocol() == uint8(header.ICMPv4ProtocolNumber) {
+		// Get transport header (contains ICMP data)
+		transHdr := pkt.TransportHeader()
+		if transHdr.View().Size() < header.ICMPv4MinimumSize {
+			d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
+			return
+		}
+
+		icmpHdr := header.ICMPv4(transHdr.Slice())
+		// Only handle Echo Request (Type 8)
+		if icmpHdr.Type() == header.ICMPv4Echo {
+			id := icmpHdr.Ident()
+			seq := icmpHdr.Sequence()
+			payload := pkt.Data().AsRange().ToSlice()
+
+			d.ep.logger.Info("intercepted ICMP Echo Request",
+				zap.String("src", srcIP.String()),
+				zap.String("dst", dstIP.String()),
+				zap.Uint16("id", id),
+				zap.Uint16("seq", seq),
+				zap.Int("payload_len", len(payload)),
+			)
+
+			if d.ep.icmpHandler != nil {
+				d.ep.icmpHandler.HandleICMPPacket(srcIP, dstIP, id, seq, payload)
+			}
+			return // Don't pass ICMP to gVisor - we handle it ourselves
+		}
+	}
+
+	// Other protocols - pass to gVisor
+	d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
 }
 
 // WriteRawPacket writes a raw IP packet back to the TUN
@@ -207,6 +276,42 @@ func checksum(data []byte, initial uint16) uint16 {
 		sum = (sum >> 16) + (sum & 0xffff)
 	}
 	return uint16(sum)
+}
+
+// BuildICMPEchoReply creates an ICMP Echo Reply packet
+func BuildICMPEchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
+	// Calculate total lengths
+	ipLen := header.IPv4MinimumSize
+	icmpLen := header.ICMPv4MinimumSize + len(payload)
+	totalLen := ipLen + icmpLen
+
+	pkt := make([]byte, totalLen)
+
+	// Build IP header
+	ip := header.IPv4(pkt)
+	ip.Encode(&header.IPv4Fields{
+		TotalLength: uint16(totalLen),
+		TTL:         64,
+		Protocol:    uint8(header.ICMPv4ProtocolNumber),
+		SrcAddr:     tcpip.AddrFrom4Slice(srcIP.To4()),
+		DstAddr:     tcpip.AddrFrom4Slice(dstIP.To4()),
+	})
+	ip.SetChecksum(^ip.CalculateChecksum())
+
+	// Build ICMP Echo Reply header (Type 0, Code 0)
+	icmpHdr := header.ICMPv4(pkt[ipLen:])
+	icmpHdr.SetType(header.ICMPv4EchoReply)
+	icmpHdr.SetCode(0)
+	icmpHdr.SetIdent(id)
+	icmpHdr.SetSequence(seq)
+
+	// Copy payload
+	copy(pkt[ipLen+header.ICMPv4MinimumSize:], payload)
+
+	// Calculate ICMP checksum (over entire ICMP message)
+	icmpHdr.SetChecksum(^checksum(pkt[ipLen:], 0))
+
+	return pkt
 }
 
 // Ensure interceptEndpoint implements LinkEndpoint
