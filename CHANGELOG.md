@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.12](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.11...mutiauk-v0.2.12) (2026-01-13)
+
+
+### Bug Fixes
+
+* align ICMP relay wire format with Muti Metroo ([502a88f](https://github.com/postalsys/Mutiauk/commit/502a88f7fdbb2af50a707c54430c7728153dc718))
+
 ## [0.2.11](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.10...mutiauk-v0.2.11) (2026-01-13)
 
 
