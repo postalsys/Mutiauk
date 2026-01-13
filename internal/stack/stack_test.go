@@ -1029,3 +1029,186 @@ func BenchmarkBuildUDPv6Response(b *testing.B) {
 		_ = BuildUDPv6Response(srcIP, dstIP, uint16(i), 53, payload)
 	}
 }
+
+// --- IPv6 Integration Tests ---
+
+// TestIPv6Detection verifies that IPv4 and IPv6 addresses are correctly detected
+func TestIPv6Detection(t *testing.T) {
+	tests := []struct {
+		name   string
+		ip     net.IP
+		isIPv6 bool
+	}{
+		{"IPv4 dotted", net.ParseIP("192.168.1.1"), false},
+		{"IPv4 loopback", net.ParseIP("127.0.0.1"), false},
+		{"IPv4 broadcast", net.ParseIP("255.255.255.255"), false},
+		{"IPv6 global", net.ParseIP("2001:db8::1"), true},
+		{"IPv6 loopback", net.ParseIP("::1"), true},
+		{"IPv6 link-local", net.ParseIP("fe80::1"), true},
+		{"IPv6 full", net.ParseIP("2001:0db8:85a3:0000:0000:8a2e:0370:7334"), true},
+		{"IPv4-mapped IPv6", net.ParseIP("::ffff:192.168.1.1"), false}, // To4() returns non-nil
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The detection logic used in stack.go: ip.To4() == nil means IPv6
+			isIPv6 := tt.ip.To4() == nil
+			if isIPv6 != tt.isIPv6 {
+				t.Errorf("To4() == nil for %s = %v, want %v", tt.ip, isIPv6, tt.isIPv6)
+			}
+		})
+	}
+}
+
+// TestIPv6UDPRoundTrip verifies that IPv6 UDP packets can be built and parsed back
+func TestIPv6UDPRoundTrip(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	srcPort := uint16(12345)
+	dstPort := uint16(53)
+	payload := []byte("DNS query data")
+
+	// Build the packet
+	pkt := BuildUDPv6Response(srcIP, dstIP, srcPort, dstPort, payload)
+
+	// Parse IPv6 header using gVisor
+	ipHdr := header.IPv6(pkt)
+
+	// Verify version
+	if ipHdr.PayloadLength() != uint16(header.UDPMinimumSize+len(payload)) {
+		t.Errorf("payload length = %d, want %d", ipHdr.PayloadLength(), header.UDPMinimumSize+len(payload))
+	}
+
+	// Verify next header is UDP
+	if ipHdr.TransportProtocol() != header.UDPProtocolNumber {
+		t.Errorf("transport protocol = %d, want %d (UDP)", ipHdr.TransportProtocol(), header.UDPProtocolNumber)
+	}
+
+	// Extract and verify source/destination addresses
+	srcAddr := ipHdr.SourceAddress()
+	dstAddr := ipHdr.DestinationAddress()
+	extractedSrc := net.IP(srcAddr.AsSlice())
+	extractedDst := net.IP(dstAddr.AsSlice())
+
+	if !extractedSrc.Equal(srcIP) {
+		t.Errorf("source IP = %s, want %s", extractedSrc, srcIP)
+	}
+	if !extractedDst.Equal(dstIP) {
+		t.Errorf("dest IP = %s, want %s", extractedDst, dstIP)
+	}
+
+	// Parse UDP header
+	udpHdr := header.UDP(pkt[header.IPv6MinimumSize:])
+
+	if udpHdr.SourcePort() != srcPort {
+		t.Errorf("source port = %d, want %d", udpHdr.SourcePort(), srcPort)
+	}
+	if udpHdr.DestinationPort() != dstPort {
+		t.Errorf("dest port = %d, want %d", udpHdr.DestinationPort(), dstPort)
+	}
+
+	// Verify payload
+	extractedPayload := pkt[header.IPv6MinimumSize+header.UDPMinimumSize:]
+	if string(extractedPayload) != string(payload) {
+		t.Errorf("payload = %q, want %q", extractedPayload, payload)
+	}
+}
+
+// TestIPv6ICMPRoundTrip verifies that ICMPv6 packets can be built and parsed back
+func TestIPv6ICMPRoundTrip(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	id := uint16(1234)
+	seq := uint16(5)
+	payload := []byte("ping payload")
+
+	// Build the packet
+	pkt := BuildICMPv6EchoReply(srcIP, dstIP, id, seq, payload)
+
+	// Parse IPv6 header using gVisor
+	ipHdr := header.IPv6(pkt)
+
+	// Verify next header is ICMPv6
+	if ipHdr.TransportProtocol() != header.ICMPv6ProtocolNumber {
+		t.Errorf("transport protocol = %d, want %d (ICMPv6)", ipHdr.TransportProtocol(), header.ICMPv6ProtocolNumber)
+	}
+
+	// Parse ICMPv6 header
+	icmpHdr := header.ICMPv6(pkt[header.IPv6MinimumSize:])
+
+	// Verify type is Echo Reply (129)
+	if icmpHdr.Type() != header.ICMPv6EchoReply {
+		t.Errorf("ICMP type = %d, want %d (Echo Reply)", icmpHdr.Type(), header.ICMPv6EchoReply)
+	}
+
+	// Verify code is 0
+	if icmpHdr.Code() != 0 {
+		t.Errorf("ICMP code = %d, want 0", icmpHdr.Code())
+	}
+
+	// Extract identifier and sequence from ICMPv6 echo header
+	// Format: Type(1) + Code(1) + Checksum(2) + Identifier(2) + Sequence(2) + Payload
+	icmpData := pkt[header.IPv6MinimumSize:]
+	extractedID := uint16(icmpData[4])<<8 | uint16(icmpData[5])
+	extractedSeq := uint16(icmpData[6])<<8 | uint16(icmpData[7])
+
+	if extractedID != id {
+		t.Errorf("ICMP id = %d, want %d", extractedID, id)
+	}
+	if extractedSeq != seq {
+		t.Errorf("ICMP seq = %d, want %d", extractedSeq, seq)
+	}
+
+	// Verify payload
+	extractedPayload := pkt[header.IPv6MinimumSize+8:] // ICMPv6 header is 8 bytes for echo
+	if string(extractedPayload) != string(payload) {
+		t.Errorf("payload = %q, want %q", extractedPayload, payload)
+	}
+}
+
+// TestIPv6AddressTypes tests various IPv6 address types work correctly
+func TestIPv6AddressTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		srcIP   string
+		dstIP   string
+		payload string
+	}{
+		{"global unicast", "2001:db8::1", "2001:db8::2", "global"},
+		{"link-local", "fe80::1", "fe80::2", "link-local"},
+		{"loopback", "::1", "::1", "loopback"},
+		{"unique local", "fd00::1", "fd00::2", "ula"},
+		{"multicast to unicast", "2001:db8::1", "ff02::1", "multicast"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srcIP := net.ParseIP(tt.srcIP)
+			dstIP := net.ParseIP(tt.dstIP)
+			payload := []byte(tt.payload)
+
+			// Test UDP
+			udpPkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, payload)
+			if udpPkt[0]>>4 != 6 {
+				t.Errorf("UDP packet version = %d, want 6", udpPkt[0]>>4)
+			}
+
+			// Verify addresses in packet
+			ipHdr := header.IPv6(udpPkt)
+			pktSrcAddr := ipHdr.SourceAddress()
+			pktDstAddr := ipHdr.DestinationAddress()
+			if !net.IP(pktSrcAddr.AsSlice()).Equal(srcIP) {
+				t.Errorf("UDP src = %s, want %s", pktSrcAddr, srcIP)
+			}
+			if !net.IP(pktDstAddr.AsSlice()).Equal(dstIP) {
+				t.Errorf("UDP dst = %s, want %s", pktDstAddr, dstIP)
+			}
+
+			// Test ICMP
+			icmpPkt := BuildICMPv6EchoReply(srcIP, dstIP, 1, 1, payload)
+			if icmpPkt[0]>>4 != 6 {
+				t.Errorf("ICMP packet version = %d, want 6", icmpPkt[0]>>4)
+			}
+		})
+	}
+}
