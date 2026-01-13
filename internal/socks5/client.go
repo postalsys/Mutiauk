@@ -126,7 +126,13 @@ func (c *Client) UDPAssociate(ctx context.Context, localAddr *net.UDPAddr) (*UDP
 	}
 
 	// Create UDP connection to relay (use unconnected socket for flexibility)
-	udpConn, err := net.ListenUDP("udp", nil)
+	// Use "udp4" for IPv4 relay addresses - dual-stack "udp" sockets can have
+	// routing issues in Docker/container environments where IPv6 isn't configured
+	network := "udp"
+	if relayAddr.Type == AddrTypeIPv4 || (relayAddr.IP != nil && relayAddr.IP.To4() != nil) {
+		network = "udp4"
+	}
+	udpConn, err := net.ListenUDP(network, nil)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to create UDP socket: %w", err)
