@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.10](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.9...mutiauk-v0.2.10) (2026-01-13)
+
+
+### Features
+
+* add ICMP echo forwarding through SOCKS5 proxy ([7fcca83](https://github.com/postalsys/Mutiauk/commit/7fcca837f2fc4aa23c4941ea64d73bf208d26482))
+
 ## [0.2.9](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.8...mutiauk-v0.2.9) (2026-01-13)
 
 
