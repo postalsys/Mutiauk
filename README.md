@@ -84,6 +84,26 @@ autoroutes:
 
 Full documentation: https://mutimetroo.com/mutiauk/
 
+## Benchmarks
+
+Performance benchmarks running through a Muti Metroo SOCKS5 tunnel:
+
+| Protocol | Throughput | Duration | Notes |
+|----------|------------|----------|-------|
+| TCP | 1.42 Gbits/sec | 60s | 10 concurrent streams via iperf3 |
+| UDP | 100 Mbits/sec | 60s | 0.09% packet loss, 0.2ms jitter |
+
+**Test environment:** All components (TUN client, SOCKS5 ingress, exit node, echo
+server) running on the same machine in Docker containers. Real-world performance
+over network links will vary based on latency and bandwidth.
+
+**Data path:**
+```
+Client -> TUN -> Mutiauk -> SOCKS5 -> Muti Metroo (QUIC) -> Exit -> Target
+```
+
+See [test/loadtest/](test/loadtest/) for the benchmark code and instructions.
+
 ## Building
 
 ```bash
@@ -95,6 +115,12 @@ make build-linux-arm64
 
 # Run tests
 make test
+
+# Run load tests
+make loadtest-up      # Start test environment
+make loadtest-shell   # Get shell in test container
+make loadtest-run     # Run full test suite
+make loadtest-down    # Stop test environment
 ```
 
 ## License
