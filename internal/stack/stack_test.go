@@ -768,14 +768,14 @@ func BenchmarkNewInterceptEndpoint(b *testing.B) {
 
 // --- ICMPv6 Tests ---
 
-func TestBuildICMPv6EchoReply(t *testing.T) {
+func TestBuildICMPEchoReply_IPv6(t *testing.T) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 	id := uint16(1234)
 	seq := uint16(5678)
 	payload := []byte("hello ipv6")
 
-	pkt := BuildICMPv6EchoReply(srcIP, dstIP, id, seq, payload)
+	pkt := BuildICMPEchoReply(srcIP, dstIP, id, seq, payload)
 
 	// IPv6 header is 40 bytes, ICMPv6 echo is 8 bytes minimum
 	expectedLen := 40 + 8 + len(payload)
@@ -828,11 +828,11 @@ func TestBuildICMPv6EchoReply(t *testing.T) {
 	}
 }
 
-func TestBuildICMPv6EchoReply_EmptyPayload(t *testing.T) {
+func TestBuildICMPEchoReply_IPv6_EmptyPayload(t *testing.T) {
 	srcIP := net.ParseIP("::1")
 	dstIP := net.ParseIP("::2")
 
-	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 100, 1, []byte{})
+	pkt := BuildICMPEchoReply(srcIP, dstIP, 100, 1, []byte{})
 
 	// IPv6 header (40) + ICMPv6 echo header (8)
 	expectedLen := 40 + 8
@@ -841,11 +841,11 @@ func TestBuildICMPv6EchoReply_EmptyPayload(t *testing.T) {
 	}
 }
 
-func TestBuildICMPv6EchoReply_Checksum(t *testing.T) {
+func TestBuildICMPEchoReply_IPv6_Checksum(t *testing.T) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 
-	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 1, 1, []byte("test"))
+	pkt := BuildICMPEchoReply(srcIP, dstIP, 1, 1, []byte("test"))
 
 	// Checksum bytes are at offset 42-43 (IPv6 header 40 + ICMPv6 checksum offset 2)
 	checksum := uint16(pkt[42])<<8 | uint16(pkt[43])
@@ -854,7 +854,7 @@ func TestBuildICMPv6EchoReply_Checksum(t *testing.T) {
 	}
 }
 
-func TestBuildICMPv6EchoReply_LargePayload(t *testing.T) {
+func TestBuildICMPEchoReply_IPv6_LargePayload(t *testing.T) {
 	srcIP := net.ParseIP("fe80::1")
 	dstIP := net.ParseIP("fe80::2")
 	payload := make([]byte, 1024)
@@ -862,7 +862,7 @@ func TestBuildICMPv6EchoReply_LargePayload(t *testing.T) {
 		payload[i] = byte(i % 256)
 	}
 
-	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 9999, 100, payload)
+	pkt := BuildICMPEchoReply(srcIP, dstIP, 9999, 100, payload)
 
 	expectedLen := 40 + 8 + len(payload)
 	if len(pkt) != expectedLen {
@@ -879,27 +879,27 @@ func TestBuildICMPv6EchoReply_LargePayload(t *testing.T) {
 	}
 }
 
-func BenchmarkBuildICMPv6EchoReply(b *testing.B) {
+func BenchmarkBuildICMPEchoReply_IPv6(b *testing.B) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 	payload := []byte("benchmark payload data")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = BuildICMPv6EchoReply(srcIP, dstIP, 1234, uint16(i), payload)
+		_ = BuildICMPEchoReply(srcIP, dstIP, 1234, uint16(i), payload)
 	}
 }
 
 // --- IPv6 UDP Tests ---
 
-func TestBuildUDPv6Response(t *testing.T) {
+func TestBuildUDPResponse_IPv6(t *testing.T) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 	srcPort := uint16(12345)
 	dstPort := uint16(53)
 	payload := []byte("hello ipv6 udp")
 
-	pkt := BuildUDPv6Response(srcIP, dstIP, srcPort, dstPort, payload)
+	pkt := BuildUDPResponse(srcIP, dstIP, srcPort, dstPort, payload)
 
 	// IPv6 header is 40 bytes, UDP header is 8 bytes
 	expectedLen := 40 + 8 + len(payload)
@@ -951,11 +951,11 @@ func TestBuildUDPv6Response(t *testing.T) {
 	}
 }
 
-func TestBuildUDPv6Response_EmptyPayload(t *testing.T) {
+func TestBuildUDPResponse_IPv6_EmptyPayload(t *testing.T) {
 	srcIP := net.ParseIP("::1")
 	dstIP := net.ParseIP("::2")
 
-	pkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, []byte{})
+	pkt := BuildUDPResponse(srcIP, dstIP, 1234, 5678, []byte{})
 
 	// IPv6 header (40) + UDP header (8)
 	expectedLen := 40 + 8
@@ -964,11 +964,11 @@ func TestBuildUDPv6Response_EmptyPayload(t *testing.T) {
 	}
 }
 
-func TestBuildUDPv6Response_Checksum(t *testing.T) {
+func TestBuildUDPResponse_IPv6_Checksum(t *testing.T) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 
-	pkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, []byte("test"))
+	pkt := BuildUDPResponse(srcIP, dstIP, 1234, 5678, []byte("test"))
 
 	// Checksum bytes are at offset 46-47 (IPv6 header 40 + UDP checksum offset 6)
 	checksum := uint16(pkt[46])<<8 | uint16(pkt[47])
@@ -977,7 +977,7 @@ func TestBuildUDPv6Response_Checksum(t *testing.T) {
 	}
 }
 
-func TestBuildUDPv6Response_LargePayload(t *testing.T) {
+func TestBuildUDPResponse_IPv6_LargePayload(t *testing.T) {
 	srcIP := net.ParseIP("fe80::1")
 	dstIP := net.ParseIP("fe80::2")
 	payload := make([]byte, 1024)
@@ -985,7 +985,7 @@ func TestBuildUDPv6Response_LargePayload(t *testing.T) {
 		payload[i] = byte(i % 256)
 	}
 
-	pkt := BuildUDPv6Response(srcIP, dstIP, 9999, 100, payload)
+	pkt := BuildUDPResponse(srcIP, dstIP, 9999, 100, payload)
 
 	expectedLen := 40 + 8 + len(payload)
 	if len(pkt) != expectedLen {
@@ -1002,12 +1002,12 @@ func TestBuildUDPv6Response_LargePayload(t *testing.T) {
 	}
 }
 
-func TestBuildUDPv6Response_LinkLocal(t *testing.T) {
+func TestBuildUDPResponse_IPv6_LinkLocal(t *testing.T) {
 	// Test with link-local addresses
 	srcIP := net.ParseIP("fe80::1")
 	dstIP := net.ParseIP("fe80::2")
 
-	pkt := BuildUDPv6Response(srcIP, dstIP, 546, 547, []byte("dhcpv6"))
+	pkt := BuildUDPResponse(srcIP, dstIP, 546, 547, []byte("dhcpv6"))
 
 	if len(pkt) != 40+8+6 {
 		t.Errorf("packet length = %d, want %d", len(pkt), 40+8+6)
@@ -1019,14 +1019,14 @@ func TestBuildUDPv6Response_LinkLocal(t *testing.T) {
 	}
 }
 
-func BenchmarkBuildUDPv6Response(b *testing.B) {
+func BenchmarkBuildUDPResponse_IPv6(b *testing.B) {
 	srcIP := net.ParseIP("2001:db8::1")
 	dstIP := net.ParseIP("2001:db8::2")
 	payload := []byte("benchmark payload data")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = BuildUDPv6Response(srcIP, dstIP, uint16(i), 53, payload)
+		_ = BuildUDPResponse(srcIP, dstIP, uint16(i), 53, payload)
 	}
 }
 
@@ -1069,7 +1069,7 @@ func TestIPv6UDPRoundTrip(t *testing.T) {
 	payload := []byte("DNS query data")
 
 	// Build the packet
-	pkt := BuildUDPv6Response(srcIP, dstIP, srcPort, dstPort, payload)
+	pkt := BuildUDPResponse(srcIP, dstIP, srcPort, dstPort, payload)
 
 	// Parse IPv6 header using gVisor
 	ipHdr := header.IPv6(pkt)
@@ -1123,7 +1123,7 @@ func TestIPv6ICMPRoundTrip(t *testing.T) {
 	payload := []byte("ping payload")
 
 	// Build the packet
-	pkt := BuildICMPv6EchoReply(srcIP, dstIP, id, seq, payload)
+	pkt := BuildICMPEchoReply(srcIP, dstIP, id, seq, payload)
 
 	// Parse IPv6 header using gVisor
 	ipHdr := header.IPv6(pkt)
@@ -1188,7 +1188,7 @@ func TestIPv6AddressTypes(t *testing.T) {
 			payload := []byte(tt.payload)
 
 			// Test UDP
-			udpPkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, payload)
+			udpPkt := BuildUDPResponse(srcIP, dstIP, 1234, 5678, payload)
 			if udpPkt[0]>>4 != 6 {
 				t.Errorf("UDP packet version = %d, want 6", udpPkt[0]>>4)
 			}
@@ -1205,7 +1205,7 @@ func TestIPv6AddressTypes(t *testing.T) {
 			}
 
 			// Test ICMP
-			icmpPkt := BuildICMPv6EchoReply(srcIP, dstIP, 1, 1, payload)
+			icmpPkt := BuildICMPEchoReply(srcIP, dstIP, 1, 1, payload)
 			if icmpPkt[0]>>4 != 6 {
 				t.Errorf("ICMP packet version = %d, want 6", icmpPkt[0]>>4)
 			}

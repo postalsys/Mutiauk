@@ -227,9 +227,22 @@ func (e *interceptEndpoint) WriteRawPacket(data []byte) error {
 	return err
 }
 
-// BuildUDPResponse creates a UDP response packet
+// isIPv6 returns true if the IP address is IPv6 (not IPv4 or IPv4-mapped IPv6).
+func isIPv6(ip net.IP) bool {
+	return ip.To4() == nil
+}
+
+// BuildUDPResponse creates a UDP response packet for the appropriate IP version.
+// It automatically detects whether to use IPv4 or IPv6 based on the source IP.
 func BuildUDPResponse(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
-	// Calculate total lengths
+	if isIPv6(srcIP) {
+		return buildUDPv6Response(srcIP, dstIP, srcPort, dstPort, payload)
+	}
+	return buildUDPv4Response(srcIP, dstIP, srcPort, dstPort, payload)
+}
+
+// buildUDPv4Response creates an IPv4 UDP response packet.
+func buildUDPv4Response(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
 	ipLen := header.IPv4MinimumSize
 	udpLen := header.UDPMinimumSize + len(payload)
 	totalLen := ipLen + udpLen
@@ -284,9 +297,8 @@ func checksum(data []byte, initial uint16) uint16 {
 	return uint16(sum)
 }
 
-// BuildUDPv6Response creates an IPv6 UDP response packet
-func BuildUDPv6Response(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
-	// Calculate total lengths
+// buildUDPv6Response creates an IPv6 UDP response packet.
+func buildUDPv6Response(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
 	ipLen := header.IPv6MinimumSize
 	udpLen := header.UDPMinimumSize + len(payload)
 	totalLen := ipLen + udpLen
@@ -325,9 +337,17 @@ func BuildUDPv6Response(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []
 	return pkt
 }
 
-// BuildICMPEchoReply creates an ICMP Echo Reply packet
+// BuildICMPEchoReply creates an ICMP Echo Reply packet for the appropriate IP version.
+// It automatically detects whether to use IPv4 or IPv6 based on the source IP.
 func BuildICMPEchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
-	// Calculate total lengths
+	if isIPv6(srcIP) {
+		return buildICMPv6EchoReply(srcIP, dstIP, id, seq, payload)
+	}
+	return buildICMPv4EchoReply(srcIP, dstIP, id, seq, payload)
+}
+
+// buildICMPv4EchoReply creates an IPv4 ICMP Echo Reply packet.
+func buildICMPv4EchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
 	ipLen := header.IPv4MinimumSize
 	icmpLen := header.ICMPv4MinimumSize + len(payload)
 	totalLen := ipLen + icmpLen
@@ -512,9 +532,8 @@ func (d *interceptDispatcher) handleIPv6Packet(pkt *stack.PacketBuffer) {
 	d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
 }
 
-// BuildICMPv6EchoReply creates an ICMPv6 Echo Reply packet
-func BuildICMPv6EchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
-	// Calculate total lengths
+// buildICMPv6EchoReply creates an IPv6 ICMPv6 Echo Reply packet.
+func buildICMPv6EchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
 	ipLen := header.IPv6MinimumSize
 	icmpLen := header.ICMPv6EchoMinimumSize + len(payload)
 	totalLen := ipLen + icmpLen
