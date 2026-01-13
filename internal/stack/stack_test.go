@@ -765,3 +765,127 @@ func BenchmarkNewInterceptEndpoint(b *testing.B) {
 		_ = newInterceptEndpoint(nil, handler, nil, tunWriter, logger)
 	}
 }
+
+// --- ICMPv6 Tests ---
+
+func TestBuildICMPv6EchoReply(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	id := uint16(1234)
+	seq := uint16(5678)
+	payload := []byte("hello ipv6")
+
+	pkt := BuildICMPv6EchoReply(srcIP, dstIP, id, seq, payload)
+
+	// IPv6 header is 40 bytes, ICMPv6 echo is 8 bytes minimum
+	expectedLen := 40 + 8 + len(payload)
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+
+	// Check IPv6 header fields
+	if pkt[0]>>4 != 6 {
+		t.Errorf("IP version = %d, want 6", pkt[0]>>4)
+	}
+
+	// Next header should be ICMPv6 (58)
+	if pkt[6] != 58 {
+		t.Errorf("next header = %d, want 58 (ICMPv6)", pkt[6])
+	}
+
+	// Hop limit should be 64
+	if pkt[7] != 64 {
+		t.Errorf("hop limit = %d, want 64", pkt[7])
+	}
+
+	// Check ICMPv6 type (Echo Reply = 129)
+	icmpOffset := 40
+	if pkt[icmpOffset] != 129 {
+		t.Errorf("ICMPv6 type = %d, want 129 (Echo Reply)", pkt[icmpOffset])
+	}
+
+	// Check ICMPv6 code (should be 0)
+	if pkt[icmpOffset+1] != 0 {
+		t.Errorf("ICMPv6 code = %d, want 0", pkt[icmpOffset+1])
+	}
+
+	// Check identifier
+	gotID := uint16(pkt[icmpOffset+4])<<8 | uint16(pkt[icmpOffset+5])
+	if gotID != id {
+		t.Errorf("identifier = %d, want %d", gotID, id)
+	}
+
+	// Check sequence
+	gotSeq := uint16(pkt[icmpOffset+6])<<8 | uint16(pkt[icmpOffset+7])
+	if gotSeq != seq {
+		t.Errorf("sequence = %d, want %d", gotSeq, seq)
+	}
+
+	// Check payload
+	gotPayload := pkt[icmpOffset+8:]
+	if string(gotPayload) != string(payload) {
+		t.Errorf("payload = %q, want %q", gotPayload, payload)
+	}
+}
+
+func TestBuildICMPv6EchoReply_EmptyPayload(t *testing.T) {
+	srcIP := net.ParseIP("::1")
+	dstIP := net.ParseIP("::2")
+
+	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 100, 1, []byte{})
+
+	// IPv6 header (40) + ICMPv6 echo header (8)
+	expectedLen := 40 + 8
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+}
+
+func TestBuildICMPv6EchoReply_Checksum(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+
+	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 1, 1, []byte("test"))
+
+	// Checksum bytes are at offset 42-43 (IPv6 header 40 + ICMPv6 checksum offset 2)
+	checksum := uint16(pkt[42])<<8 | uint16(pkt[43])
+	if checksum == 0 {
+		t.Error("checksum should not be zero")
+	}
+}
+
+func TestBuildICMPv6EchoReply_LargePayload(t *testing.T) {
+	srcIP := net.ParseIP("fe80::1")
+	dstIP := net.ParseIP("fe80::2")
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	pkt := BuildICMPv6EchoReply(srcIP, dstIP, 9999, 100, payload)
+
+	expectedLen := 40 + 8 + len(payload)
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+
+	// Verify payload integrity
+	gotPayload := pkt[48:]
+	for i := 0; i < len(payload); i++ {
+		if gotPayload[i] != payload[i] {
+			t.Errorf("payload mismatch at index %d: got %d, want %d", i, gotPayload[i], payload[i])
+			break
+		}
+	}
+}
+
+func BenchmarkBuildICMPv6EchoReply(b *testing.B) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	payload := []byte("benchmark payload data")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildICMPv6EchoReply(srcIP, dstIP, 1234, uint16(i), payload)
+	}
+}

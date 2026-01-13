@@ -289,7 +289,15 @@ func (s *Stack) HandleICMPPacket(srcIP, dstIP net.IP, id, seq uint16, payload []
 		}
 
 		// Build ICMP echo reply packet: from dstIP to srcIP
-		replyPkt := BuildICMPEchoReply(dstIP, srcIP, id, seq, response)
+		// Use IPv6 or IPv4 builder based on address type
+		var replyPkt []byte
+		if dstIP.To4() == nil {
+			// IPv6 address
+			replyPkt = BuildICMPv6EchoReply(dstIP, srcIP, id, seq, response)
+		} else {
+			// IPv4 address
+			replyPkt = BuildICMPEchoReply(dstIP, srcIP, id, seq, response)
+		}
 
 		// Write response back to TUN
 		if _, err := s.tunDev.Write(replyPkt); err != nil {

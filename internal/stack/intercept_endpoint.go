@@ -64,7 +64,13 @@ func (d *interceptDispatcher) DeliverNetworkPacket(protocol tcpip.NetworkProtoco
 		zap.Int("size", pkt.Size()),
 	)
 
-	// Only intercept IPv4 for now
+	// Handle IPv6 packets
+	if protocol == header.IPv6ProtocolNumber {
+		d.handleIPv6Packet(pkt)
+		return
+	}
+
+	// Handle IPv4 packets
 	if protocol != header.IPv4ProtocolNumber {
 		d.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
 		return
@@ -310,6 +316,200 @@ func BuildICMPEchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []b
 
 	// Calculate ICMP checksum (over entire ICMP message)
 	icmpHdr.SetChecksum(^checksum(pkt[ipLen:], 0))
+
+	return pkt
+}
+
+// handleIPv6Packet handles IPv6 packet interception
+func (d *interceptDispatcher) handleIPv6Packet(pkt *stack.PacketBuffer) {
+	// Get the network header - may not be parsed yet
+	netHdr := pkt.NetworkHeader()
+
+	if netHdr.View().Size() < header.IPv6MinimumSize {
+		// Network header not yet parsed, parse from data
+		data := pkt.Data().AsRange().ToSlice()
+		if len(data) < header.IPv6MinimumSize {
+			d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
+			return
+		}
+		ipHdr := header.IPv6(data)
+
+		// Check for UDP
+		if ipHdr.NextHeader() == uint8(header.UDPProtocolNumber) {
+			ipHdrLen := header.IPv6MinimumSize
+			if len(data) >= ipHdrLen+header.UDPMinimumSize {
+				udpHdr := header.UDP(data[ipHdrLen:])
+				payload := data[ipHdrLen+header.UDPMinimumSize:]
+				srcAddr := ipHdr.SourceAddress()
+				dstAddr := ipHdr.DestinationAddress()
+				srcIP := net.IP(srcAddr.AsSlice())
+				dstIP := net.IP(dstAddr.AsSlice())
+
+				d.ep.logger.Debug("intercepted IPv6 UDP packet",
+					zap.String("src", srcIP.String()),
+					zap.Uint16("src_port", udpHdr.SourcePort()),
+					zap.String("dst", dstIP.String()),
+					zap.Uint16("dst_port", udpHdr.DestinationPort()),
+					zap.Int("payload_len", len(payload)),
+				)
+
+				if d.ep.udpHandler != nil {
+					d.ep.udpHandler.HandleUDPPacket(srcIP, dstIP, udpHdr.SourcePort(), udpHdr.DestinationPort(), payload)
+				}
+				return // Don't pass UDP to gVisor - we handle it ourselves
+			}
+		}
+
+		// Check for ICMPv6 Echo Request
+		if ipHdr.NextHeader() == uint8(header.ICMPv6ProtocolNumber) {
+			ipHdrLen := header.IPv6MinimumSize
+			if len(data) >= ipHdrLen+header.ICMPv6MinimumSize {
+				icmpHdr := header.ICMPv6(data[ipHdrLen:])
+				// Only handle Echo Request (Type 128)
+				if icmpHdr.Type() == header.ICMPv6EchoRequest {
+					srcAddr := ipHdr.SourceAddress()
+					dstAddr := ipHdr.DestinationAddress()
+					srcIP := net.IP(srcAddr.AsSlice())
+					dstIP := net.IP(dstAddr.AsSlice())
+					// ICMPv6 echo has identifier at offset 4 and sequence at offset 6
+					id := uint16(data[ipHdrLen+4])<<8 | uint16(data[ipHdrLen+5])
+					seq := uint16(data[ipHdrLen+6])<<8 | uint16(data[ipHdrLen+7])
+					payload := data[ipHdrLen+header.ICMPv6EchoMinimumSize:]
+
+					d.ep.logger.Debug("intercepted ICMPv6 Echo Request",
+						zap.String("src", srcIP.String()),
+						zap.String("dst", dstIP.String()),
+						zap.Uint16("id", id),
+						zap.Uint16("seq", seq),
+						zap.Int("payload_len", len(payload)),
+					)
+
+					if d.ep.icmpHandler != nil {
+						d.ep.icmpHandler.HandleICMPPacket(srcIP, dstIP, id, seq, payload)
+					}
+					return // Don't pass ICMPv6 to gVisor - we handle it ourselves
+				}
+			}
+		}
+
+		// Not UDP/ICMPv6 or malformed, pass to gVisor
+		d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
+		return
+	}
+
+	ipHdr := header.IPv6(netHdr.Slice())
+	srcAddr := ipHdr.SourceAddress()
+	dstAddr := ipHdr.DestinationAddress()
+	srcIP := net.IP(srcAddr.AsSlice())
+	dstIP := net.IP(dstAddr.AsSlice())
+
+	// Handle UDP
+	if ipHdr.NextHeader() == uint8(header.UDPProtocolNumber) {
+		// Get transport header
+		transHdr := pkt.TransportHeader()
+		if transHdr.View().Size() < header.UDPMinimumSize {
+			d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
+			return
+		}
+
+		udpHdr := header.UDP(transHdr.Slice())
+		srcPort := udpHdr.SourcePort()
+		dstPort := udpHdr.DestinationPort()
+
+		// Get payload
+		payload := pkt.Data().AsRange().ToSlice()
+
+		d.ep.logger.Info("intercepted IPv6 UDP packet",
+			zap.String("src", srcIP.String()),
+			zap.Uint16("src_port", srcPort),
+			zap.String("dst", dstIP.String()),
+			zap.Uint16("dst_port", dstPort),
+			zap.Int("payload_len", len(payload)),
+		)
+
+		// Call the UDP handler if set
+		if d.ep.udpHandler != nil {
+			d.ep.udpHandler.HandleUDPPacket(srcIP, dstIP, srcPort, dstPort, payload)
+		}
+		return // Don't pass UDP to gVisor - we handle it ourselves
+	}
+
+	// Handle ICMPv6 Echo Request
+	if ipHdr.NextHeader() == uint8(header.ICMPv6ProtocolNumber) {
+		// Get transport header (contains ICMPv6 data)
+		transHdr := pkt.TransportHeader()
+		if transHdr.View().Size() < header.ICMPv6MinimumSize {
+			d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
+			return
+		}
+
+		icmpHdr := header.ICMPv6(transHdr.Slice())
+		// Only handle Echo Request (Type 128)
+		if icmpHdr.Type() == header.ICMPv6EchoRequest {
+			// ICMPv6 echo has identifier at offset 4 and sequence at offset 6
+			icmpData := transHdr.Slice()
+			id := uint16(icmpData[4])<<8 | uint16(icmpData[5])
+			seq := uint16(icmpData[6])<<8 | uint16(icmpData[7])
+			payload := pkt.Data().AsRange().ToSlice()
+
+			d.ep.logger.Info("intercepted ICMPv6 Echo Request",
+				zap.String("src", srcIP.String()),
+				zap.String("dst", dstIP.String()),
+				zap.Uint16("id", id),
+				zap.Uint16("seq", seq),
+				zap.Int("payload_len", len(payload)),
+			)
+
+			if d.ep.icmpHandler != nil {
+				d.ep.icmpHandler.HandleICMPPacket(srcIP, dstIP, id, seq, payload)
+			}
+			return // Don't pass ICMPv6 to gVisor - we handle it ourselves
+		}
+	}
+
+	// Other protocols - pass to gVisor
+	d.NetworkDispatcher.DeliverNetworkPacket(header.IPv6ProtocolNumber, pkt)
+}
+
+// BuildICMPv6EchoReply creates an ICMPv6 Echo Reply packet
+func BuildICMPv6EchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
+	// Calculate total lengths
+	ipLen := header.IPv6MinimumSize
+	icmpLen := header.ICMPv6EchoMinimumSize + len(payload)
+	totalLen := ipLen + icmpLen
+
+	pkt := make([]byte, totalLen)
+
+	// Build IPv6 header
+	ip := header.IPv6(pkt)
+	ip.Encode(&header.IPv6Fields{
+		PayloadLength:     uint16(icmpLen),
+		TransportProtocol: header.ICMPv6ProtocolNumber,
+		HopLimit:          64,
+		SrcAddr:           tcpip.AddrFrom16Slice(srcIP.To16()),
+		DstAddr:           tcpip.AddrFrom16Slice(dstIP.To16()),
+	})
+
+	// Build ICMPv6 Echo Reply header (Type 129, Code 0)
+	icmpHdr := header.ICMPv6(pkt[ipLen:])
+	icmpHdr.SetType(header.ICMPv6EchoReply)
+	icmpHdr.SetCode(0)
+	// Set identifier and sequence (at offsets 4 and 6 in ICMPv6 message)
+	pkt[ipLen+4] = byte(id >> 8)
+	pkt[ipLen+5] = byte(id)
+	pkt[ipLen+6] = byte(seq >> 8)
+	pkt[ipLen+7] = byte(seq)
+
+	// Copy payload
+	copy(pkt[ipLen+header.ICMPv6EchoMinimumSize:], payload)
+
+	// Calculate ICMPv6 checksum (requires pseudo-header)
+	xsum := header.PseudoHeaderChecksum(header.ICMPv6ProtocolNumber,
+		tcpip.AddrFrom16Slice(srcIP.To16()),
+		tcpip.AddrFrom16Slice(dstIP.To16()),
+		uint16(icmpLen))
+	xsum = checksum(pkt[ipLen:], xsum)
+	icmpHdr.SetChecksum(^xsum)
 
 	return pkt
 }
