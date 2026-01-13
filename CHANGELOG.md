@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.9](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.8...mutiauk-v0.2.9) (2026-01-13)
+
+
+### Bug Fixes
+
+* use IPv4 UDP socket for IPv4 relay addresses ([b0fb687](https://github.com/postalsys/Mutiauk/commit/b0fb687403b192eafb0149f24506595a4275bc02))
+
 ## [0.2.8](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.7...mutiauk-v0.2.8) (2026-01-10)
 
 
