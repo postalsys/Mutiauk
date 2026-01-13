@@ -284,6 +284,47 @@ func checksum(data []byte, initial uint16) uint16 {
 	return uint16(sum)
 }
 
+// BuildUDPv6Response creates an IPv6 UDP response packet
+func BuildUDPv6Response(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
+	// Calculate total lengths
+	ipLen := header.IPv6MinimumSize
+	udpLen := header.UDPMinimumSize + len(payload)
+	totalLen := ipLen + udpLen
+
+	pkt := make([]byte, totalLen)
+
+	// Build IPv6 header
+	ip := header.IPv6(pkt)
+	ip.Encode(&header.IPv6Fields{
+		PayloadLength:     uint16(udpLen),
+		TransportProtocol: header.UDPProtocolNumber,
+		HopLimit:          64,
+		SrcAddr:           tcpip.AddrFrom16Slice(srcIP.To16()),
+		DstAddr:           tcpip.AddrFrom16Slice(dstIP.To16()),
+	})
+
+	// Build UDP header
+	udp := header.UDP(pkt[ipLen:])
+	udp.Encode(&header.UDPFields{
+		SrcPort: srcPort,
+		DstPort: dstPort,
+		Length:  uint16(udpLen),
+	})
+
+	// Copy payload
+	copy(pkt[ipLen+header.UDPMinimumSize:], payload)
+
+	// Calculate UDP checksum (mandatory for IPv6)
+	xsum := header.PseudoHeaderChecksum(header.UDPProtocolNumber,
+		tcpip.AddrFrom16Slice(srcIP.To16()),
+		tcpip.AddrFrom16Slice(dstIP.To16()),
+		uint16(udpLen))
+	xsum = checksum(pkt[ipLen:], xsum)
+	udp.SetChecksum(^xsum)
+
+	return pkt
+}
+
 // BuildICMPEchoReply creates an ICMP Echo Reply packet
 func BuildICMPEchoReply(srcIP, dstIP net.IP, id, seq uint16, payload []byte) []byte {
 	// Calculate total lengths

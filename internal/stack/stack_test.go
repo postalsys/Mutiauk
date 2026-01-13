@@ -889,3 +889,143 @@ func BenchmarkBuildICMPv6EchoReply(b *testing.B) {
 		_ = BuildICMPv6EchoReply(srcIP, dstIP, 1234, uint16(i), payload)
 	}
 }
+
+// --- IPv6 UDP Tests ---
+
+func TestBuildUDPv6Response(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	srcPort := uint16(12345)
+	dstPort := uint16(53)
+	payload := []byte("hello ipv6 udp")
+
+	pkt := BuildUDPv6Response(srcIP, dstIP, srcPort, dstPort, payload)
+
+	// IPv6 header is 40 bytes, UDP header is 8 bytes
+	expectedLen := 40 + 8 + len(payload)
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+
+	// Check IPv6 header fields
+	if pkt[0]>>4 != 6 {
+		t.Errorf("IP version = %d, want 6", pkt[0]>>4)
+	}
+
+	// Next header should be UDP (17)
+	if pkt[6] != 17 {
+		t.Errorf("next header = %d, want 17 (UDP)", pkt[6])
+	}
+
+	// Hop limit should be 64
+	if pkt[7] != 64 {
+		t.Errorf("hop limit = %d, want 64", pkt[7])
+	}
+
+	// Check UDP header
+	udpOffset := 40
+
+	// Source port
+	gotSrcPort := uint16(pkt[udpOffset])<<8 | uint16(pkt[udpOffset+1])
+	if gotSrcPort != srcPort {
+		t.Errorf("source port = %d, want %d", gotSrcPort, srcPort)
+	}
+
+	// Destination port
+	gotDstPort := uint16(pkt[udpOffset+2])<<8 | uint16(pkt[udpOffset+3])
+	if gotDstPort != dstPort {
+		t.Errorf("destination port = %d, want %d", gotDstPort, dstPort)
+	}
+
+	// UDP length
+	gotUDPLen := uint16(pkt[udpOffset+4])<<8 | uint16(pkt[udpOffset+5])
+	expectedUDPLen := uint16(8 + len(payload))
+	if gotUDPLen != expectedUDPLen {
+		t.Errorf("UDP length = %d, want %d", gotUDPLen, expectedUDPLen)
+	}
+
+	// Check payload
+	gotPayload := pkt[udpOffset+8:]
+	if string(gotPayload) != string(payload) {
+		t.Errorf("payload = %q, want %q", gotPayload, payload)
+	}
+}
+
+func TestBuildUDPv6Response_EmptyPayload(t *testing.T) {
+	srcIP := net.ParseIP("::1")
+	dstIP := net.ParseIP("::2")
+
+	pkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, []byte{})
+
+	// IPv6 header (40) + UDP header (8)
+	expectedLen := 40 + 8
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+}
+
+func TestBuildUDPv6Response_Checksum(t *testing.T) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+
+	pkt := BuildUDPv6Response(srcIP, dstIP, 1234, 5678, []byte("test"))
+
+	// Checksum bytes are at offset 46-47 (IPv6 header 40 + UDP checksum offset 6)
+	checksum := uint16(pkt[46])<<8 | uint16(pkt[47])
+	if checksum == 0 {
+		t.Error("checksum should not be zero (mandatory for IPv6 UDP)")
+	}
+}
+
+func TestBuildUDPv6Response_LargePayload(t *testing.T) {
+	srcIP := net.ParseIP("fe80::1")
+	dstIP := net.ParseIP("fe80::2")
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+
+	pkt := BuildUDPv6Response(srcIP, dstIP, 9999, 100, payload)
+
+	expectedLen := 40 + 8 + len(payload)
+	if len(pkt) != expectedLen {
+		t.Errorf("packet length = %d, want %d", len(pkt), expectedLen)
+	}
+
+	// Verify payload integrity
+	gotPayload := pkt[48:]
+	for i := 0; i < len(payload); i++ {
+		if gotPayload[i] != payload[i] {
+			t.Errorf("payload mismatch at index %d: got %d, want %d", i, gotPayload[i], payload[i])
+			break
+		}
+	}
+}
+
+func TestBuildUDPv6Response_LinkLocal(t *testing.T) {
+	// Test with link-local addresses
+	srcIP := net.ParseIP("fe80::1")
+	dstIP := net.ParseIP("fe80::2")
+
+	pkt := BuildUDPv6Response(srcIP, dstIP, 546, 547, []byte("dhcpv6"))
+
+	if len(pkt) != 40+8+6 {
+		t.Errorf("packet length = %d, want %d", len(pkt), 40+8+6)
+	}
+
+	// Verify it's a valid IPv6 packet
+	if pkt[0]>>4 != 6 {
+		t.Errorf("IP version = %d, want 6", pkt[0]>>4)
+	}
+}
+
+func BenchmarkBuildUDPv6Response(b *testing.B) {
+	srcIP := net.ParseIP("2001:db8::1")
+	dstIP := net.ParseIP("2001:db8::2")
+	payload := []byte("benchmark payload data")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildUDPv6Response(srcIP, dstIP, uint16(i), 53, payload)
+	}
+}

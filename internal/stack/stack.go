@@ -240,7 +240,15 @@ func (s *Stack) HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, pa
 		}
 
 		// Build response packet: from dstIP:dstPort to srcIP:srcPort
-		responsePkt := BuildUDPResponse(dstIP, srcIP, dstPort, srcPort, response)
+		// Use IPv6 or IPv4 builder based on address type
+		var responsePkt []byte
+		if dstIP.To4() == nil {
+			// IPv6 address
+			responsePkt = BuildUDPv6Response(dstIP, srcIP, dstPort, srcPort, response)
+		} else {
+			// IPv4 address
+			responsePkt = BuildUDPResponse(dstIP, srcIP, dstPort, srcPort, response)
+		}
 
 		// Write response back to TUN
 		if _, err := s.tunDev.Write(responsePkt); err != nil {
