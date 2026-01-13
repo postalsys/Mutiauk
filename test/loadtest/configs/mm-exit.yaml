@@ -19,6 +19,12 @@ udp:
   idle_timeout: 5m
   max_datagram_size: 1472
 
+# Enable ICMP echo for ping support
+icmp:
+  enabled: true
+  max_sessions: 100
+  idle_timeout: 1m
+
 http:
   enabled: true
   address: ":8080"

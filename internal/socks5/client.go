@@ -473,6 +473,7 @@ func (r *ICMPRelay) SendEcho(id, seq uint16, payload []byte) error {
 
 // ReceiveEcho receives an ICMP echo reply from the relay.
 // Returns the reply payload and sequence number.
+// Wire format: [ID:2][Seq:2][PayloadLen:2][Payload:N]
 func (r *ICMPRelay) ReceiveEcho() (payload []byte, seq uint16, err error) {
 	// Read header: [ID:2][Seq:2][PayloadLen:2]
 	header := make([]byte, 6)
@@ -483,14 +484,13 @@ func (r *ICMPRelay) ReceiveEcho() (payload []byte, seq uint16, err error) {
 	seq = binary.BigEndian.Uint16(header[2:4])
 	payloadLen := binary.BigEndian.Uint16(header[4:6])
 
-	// Read payload + IsReply byte
-	remaining := make([]byte, payloadLen+1)
-	if _, err := io.ReadFull(r.conn, remaining); err != nil {
-		return nil, seq, err
+	// Read payload
+	if payloadLen > 0 {
+		payload = make([]byte, payloadLen)
+		if _, err := io.ReadFull(r.conn, payload); err != nil {
+			return nil, seq, err
+		}
 	}
-
-	// Payload is everything except the last byte (IsReply flag)
-	payload = remaining[:payloadLen]
 
 	return payload, seq, nil
 }
