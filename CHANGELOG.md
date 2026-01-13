@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.11](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.10...mutiauk-v0.2.11) (2026-01-13)
+
+
+### Features
+
+* add IPv6 ICMP echo support ([19203af](https://github.com/postalsys/Mutiauk/commit/19203afda3544ad08576c018cbdc8e6118b8c8be))
+* add IPv6 UDP response support ([b0857b8](https://github.com/postalsys/Mutiauk/commit/b0857b86b4208091a763fa61abc1fd4c24e4d626))
+
 ## [0.2.10](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.9...mutiauk-v0.2.10) (2026-01-13)
 
 
