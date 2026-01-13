@@ -1,4 +1,5 @@
-.PHONY: all build build-linux clean test lint fmt install help
+.PHONY: all build build-linux clean test lint fmt install help \
+	loadtest-up loadtest-down loadtest-shell loadtest-run loadtest-logs
 
 # Build variables
 BINARY_NAME := mutiauk
@@ -67,6 +68,22 @@ run-daemon: build-linux ## Run daemon in Docker
 
 logs: ## Show daemon logs
 	docker-compose -f test/docker-compose.yml logs -f kali
+
+# Load testing with Muti Metroo tunnel
+loadtest-up: build-linux ## Start load test environment
+	docker-compose -f test/loadtest/docker-compose.yml up --build -d
+
+loadtest-down: ## Stop load test environment
+	docker-compose -f test/loadtest/docker-compose.yml down -v
+
+loadtest-shell: ## Get shell in load test kali container
+	docker-compose -f test/loadtest/docker-compose.yml exec kali bash
+
+loadtest-run: ## Run full load test suite
+	docker-compose -f test/loadtest/docker-compose.yml exec kali /scripts/run-tests.sh
+
+loadtest-logs: ## Show load test logs
+	docker-compose -f test/loadtest/docker-compose.yml logs -f
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
