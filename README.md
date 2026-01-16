@@ -9,6 +9,7 @@ traffic through a SOCKS5 proxy using Google's gVisor userspace TCP/IP stack.
 
 - Route specific CIDRs through SOCKS5 proxy
 - TCP and UDP forwarding support
+- WebSocket transport for firewall bypass
 - Hot reload configuration via SIGHUP
 - Userspace networking (no kernel modifications)
 - Automatic route fetching from Muti Metroo API
@@ -66,6 +67,12 @@ tun:
 
 socks5:
   server: proxy.example.com:1080
+  # WebSocket transport (for firewall bypass)
+  # Option 1: Use wss:// URL
+  # server: wss://relay.example.com:8443/socks5
+  # Option 2: Explicit transport
+  # transport: websocket  # "tcp" (default) or "websocket"
+  # ws_path: /socks5
 
 routes:
   - destination: 192.168.0.0/16
