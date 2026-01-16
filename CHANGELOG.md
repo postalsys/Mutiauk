@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.13](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.12...mutiauk-v0.2.13) (2026-01-16)
+
+
+### Features
+
+* add WebSocket transport for SOCKS5 connections ([9ebad6c](https://github.com/postalsys/Mutiauk/commit/9ebad6c8454ca5e0031fd7a07913a05047a823ab))
+
 ## [0.2.12](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.11...mutiauk-v0.2.12) (2026-01-13)
 
 
