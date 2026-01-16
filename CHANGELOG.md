@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.14](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.13...mutiauk-v0.2.14) (2026-01-16)
+
+
+### Features
+
+* add HTTP Basic Auth support for WebSocket transport ([2a25955](https://github.com/postalsys/Mutiauk/commit/2a25955bf334538123d2b998b1faad0b9c5557a4))
+
 ## [0.2.13](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.12...mutiauk-v0.2.13) (2026-01-16)
 
 
