@@ -245,7 +245,7 @@ func TestDialWebSocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := dialWebSocket(ctx, srv.URL(), 5*time.Second)
+	conn, err := dialWebSocket(ctx, srv.URL(), 5*time.Second, "", "")
 	if err != nil {
 		t.Fatalf("dialWebSocket() error = %v", err)
 	}
@@ -341,7 +341,7 @@ func TestWsConnSetDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := dialWebSocket(ctx, srv.URL(), 5*time.Second)
+	conn, err := dialWebSocket(ctx, srv.URL(), 5*time.Second, "", "")
 	if err != nil {
 		t.Fatalf("dialWebSocket() error = %v", err)
 	}
@@ -373,7 +373,7 @@ func TestDialWebSocketTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := dialWebSocket(ctx, "ws://192.0.2.1:12345/socks5", 100*time.Millisecond)
+	_, err := dialWebSocket(ctx, "ws://192.0.2.1:12345/socks5", 100*time.Millisecond, "", "")
 	if err == nil {
 		t.Error("expected timeout error")
 	}
@@ -383,8 +383,126 @@ func TestDialWebSocketInvalidURL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err := dialWebSocket(ctx, "not-a-url", time.Second)
+	_, err := dialWebSocket(ctx, "not-a-url", time.Second, "", "")
 	if err == nil {
 		t.Error("expected error for invalid URL")
 	}
+}
+
+// mockWebSocketServerWithHTTPAuth creates a WebSocket server that requires HTTP Basic Auth
+type mockWebSocketServerWithHTTPAuth struct {
+	server   *httptest.Server
+	username string
+	password string
+}
+
+func newMockWebSocketServerWithHTTPAuth(t *testing.T, username, password string) *mockWebSocketServerWithHTTPAuth {
+	t.Helper()
+
+	mock := &mockWebSocketServerWithHTTPAuth{
+		username: username,
+		password: password,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/socks5", func(w http.ResponseWriter, r *http.Request) {
+		// Check HTTP Basic Auth
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != mock.username || pass != mock.password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="SOCKS5"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols: []string{"socks5"},
+		})
+		if err != nil {
+			t.Logf("websocket accept error: %v", err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+
+		// Simple echo loop
+		for {
+			_, data, err := c.Read(context.Background())
+			if err != nil {
+				return
+			}
+			if err := c.Write(context.Background(), websocket.MessageBinary, data); err != nil {
+				return
+			}
+		}
+	})
+
+	mock.server = httptest.NewServer(mux)
+	return mock
+}
+
+func (m *mockWebSocketServerWithHTTPAuth) URL() string {
+	return "ws" + m.server.URL[4:] + "/socks5"
+}
+
+func (m *mockWebSocketServerWithHTTPAuth) Close() {
+	m.server.Close()
+}
+
+func TestDialWebSocketWithHTTPBasicAuth(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuth(t, "testuser", "testpass")
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Test with correct credentials
+	conn, err := dialWebSocket(ctx, srv.URL(), 5*time.Second, "testuser", "testpass")
+	if err != nil {
+		t.Fatalf("dialWebSocket() with correct credentials error = %v", err)
+	}
+	conn.Close()
+}
+
+func TestDialWebSocketWithHTTPBasicAuthWrongCredentials(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuth(t, "testuser", "testpass")
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Test with wrong credentials
+	_, err := dialWebSocket(ctx, srv.URL(), 5*time.Second, "wrong", "wrong")
+	if err == nil {
+		t.Error("expected error for wrong credentials")
+	}
+}
+
+func TestDialWebSocketWithHTTPBasicAuthNoCredentials(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuth(t, "testuser", "testpass")
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Test with no credentials (server requires them)
+	_, err := dialWebSocket(ctx, srv.URL(), 5*time.Second, "", "")
+	if err == nil {
+		t.Error("expected error for missing credentials")
+	}
+}
+
+func TestClientWithWSCredentials(t *testing.T) {
+	t.Run("credentials are stored", func(t *testing.T) {
+		client := NewClientWithOptions("proxy:8443", nil, 0, 0, ClientOptions{
+			Transport:  TransportWebSocket,
+			WSPath:     "/socks5",
+			WSUsername: "user",
+			WSPassword: "pass",
+		})
+		if client.WSUsername != "user" {
+			t.Errorf("WSUsername = %v, want %v", client.WSUsername, "user")
+		}
+		if client.WSPassword != "pass" {
+			t.Errorf("WSPassword = %v, want %v", client.WSPassword, "pass")
+		}
+	})
 }

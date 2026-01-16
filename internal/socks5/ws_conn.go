@@ -2,9 +2,11 @@ package socks5
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -27,7 +29,8 @@ type wsConn struct {
 
 // dialWebSocket connects to a SOCKS5 server over WebSocket.
 // The wsURL should be ws:// or wss:// URL including the path (e.g., wss://server:8443/socks5).
-func dialWebSocket(ctx context.Context, wsURL string, timeout time.Duration) (net.Conn, error) {
+// If username and password are provided, HTTP Basic Auth header is included in the request.
+func dialWebSocket(ctx context.Context, wsURL string, timeout time.Duration, username, password string) (net.Conn, error) {
 	dialCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -35,9 +38,19 @@ func dialWebSocket(ctx context.Context, wsURL string, timeout time.Duration) (ne
 		defer cancel()
 	}
 
-	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{
+	dialOpts := &websocket.DialOptions{
 		Subprotocols: []string{"socks5"},
-	})
+	}
+
+	// Add HTTP Basic Auth header if credentials are provided
+	if username != "" || password != "" {
+		credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		dialOpts.HTTPHeader = http.Header{
+			"Authorization": []string{"Basic " + credentials},
+		}
+	}
+
+	conn, _, err := websocket.Dial(dialCtx, wsURL, dialOpts)
 	if err != nil {
 		return nil, fmt.Errorf("websocket dial failed: %w", err)
 	}

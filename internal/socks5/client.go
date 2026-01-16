@@ -26,12 +26,16 @@ type Client struct {
 	KeepAlive  time.Duration
 	Transport  string // "tcp" (default) or "websocket"
 	WSPath     string // WebSocket path (default: "/socks5")
+	WSUsername string // WebSocket HTTP Basic Auth username (optional)
+	WSPassword string // WebSocket HTTP Basic Auth password (optional)
 }
 
 // ClientOptions contains optional configuration for the SOCKS5 client
 type ClientOptions struct {
-	Transport string // "tcp" (default) or "websocket"
-	WSPath    string // WebSocket path (default: "/socks5")
+	Transport  string // "tcp" (default) or "websocket"
+	WSPath     string // WebSocket path (default: "/socks5")
+	WSUsername string // WebSocket HTTP Basic Auth username (optional)
+	WSPassword string // WebSocket HTTP Basic Auth password (optional)
 }
 
 // NewClient creates a new SOCKS5 client
@@ -68,6 +72,8 @@ func NewClientWithOptions(serverAddr string, auth Authenticator, timeout, keepAl
 		KeepAlive:  keepAlive,
 		Transport:  transport,
 		WSPath:     wsPath,
+		WSUsername: opts.WSUsername,
+		WSPassword: opts.WSPassword,
 	}
 }
 
@@ -233,13 +239,13 @@ func (c *Client) ICMPAssociate(ctx context.Context, destIP net.IP) (*ICMPRelay, 
 func (c *Client) dialServer(ctx context.Context) (net.Conn, error) {
 	// Check if server address is a WebSocket URL
 	if c.isWebSocketURL() {
-		return dialWebSocket(ctx, c.ServerAddr, c.Timeout)
+		return dialWebSocket(ctx, c.ServerAddr, c.Timeout, c.WSUsername, c.WSPassword)
 	}
 
 	// Use explicit transport setting
 	if c.Transport == TransportWebSocket {
 		wsURL := c.buildWebSocketURL()
-		return dialWebSocket(ctx, wsURL, c.Timeout)
+		return dialWebSocket(ctx, wsURL, c.Timeout, c.WSUsername, c.WSPassword)
 	}
 
 	// Default: TCP connection

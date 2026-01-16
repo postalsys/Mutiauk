@@ -265,8 +265,10 @@ func (s *Server) createSOCKS5Client() *socks5.Client {
 		s.cfg.SOCKS5.Timeout,
 		s.cfg.SOCKS5.KeepAlive,
 		socks5.ClientOptions{
-			Transport: s.cfg.SOCKS5.Transport,
-			WSPath:    s.cfg.SOCKS5.WSPath,
+			Transport:  s.cfg.SOCKS5.Transport,
+			WSPath:     s.cfg.SOCKS5.WSPath,
+			WSUsername: s.cfg.SOCKS5.Username, // Use same credentials for WebSocket Basic Auth
+			WSPassword: s.cfg.SOCKS5.Password,
 		},
 	)
 }

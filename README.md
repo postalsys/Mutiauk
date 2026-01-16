@@ -67,6 +67,9 @@ tun:
 
 socks5:
   server: proxy.example.com:1080
+  # username/password for SOCKS5 auth and WebSocket HTTP Basic Auth
+  # username: user
+  # password: secret
   # WebSocket transport (for firewall bypass)
   # Option 1: Use wss:// URL
   # server: wss://relay.example.com:8443/socks5
