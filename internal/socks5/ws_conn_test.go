@@ -506,3 +506,219 @@ func TestClientWithWSCredentials(t *testing.T) {
 		}
 	})
 }
+
+// mockWebSocketServerWithHTTPAuthAndSOCKS5 creates a server requiring both HTTP Basic Auth and SOCKS5 auth
+type mockWebSocketServerWithHTTPAuthAndSOCKS5 struct {
+	server       *httptest.Server
+	httpUsername string
+	httpPassword string
+	socksAuth    bool
+}
+
+func newMockWebSocketServerWithHTTPAuthAndSOCKS5(t *testing.T, httpUser, httpPass string, requireSOCKSAuth bool) *mockWebSocketServerWithHTTPAuthAndSOCKS5 {
+	t.Helper()
+
+	mock := &mockWebSocketServerWithHTTPAuthAndSOCKS5{
+		httpUsername: httpUser,
+		httpPassword: httpPass,
+		socksAuth:    requireSOCKSAuth,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/socks5", func(w http.ResponseWriter, r *http.Request) {
+		// Check HTTP Basic Auth
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != mock.httpUsername || pass != mock.httpPassword {
+			w.Header().Set("WWW-Authenticate", `Basic realm="SOCKS5"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols: []string{"socks5"},
+		})
+		if err != nil {
+			t.Logf("websocket accept error: %v", err)
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+
+		mock.handleSOCKS5(t, c)
+	})
+
+	mock.server = httptest.NewServer(mux)
+	return mock
+}
+
+func (m *mockWebSocketServerWithHTTPAuthAndSOCKS5) handleSOCKS5(t *testing.T, conn *websocket.Conn) {
+	ctx := context.Background()
+
+	// Read method selection
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Logf("read method selection error: %v", err)
+		return
+	}
+	if len(data) < 2 || data[0] != Version {
+		t.Logf("invalid method selection: %v", data)
+		return
+	}
+
+	// Determine auth method
+	authMethod := byte(AuthNone)
+	if m.socksAuth {
+		authMethod = AuthPassword
+	}
+
+	// Send method response
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte{Version, authMethod}); err != nil {
+		t.Logf("write method response error: %v", err)
+		return
+	}
+
+	// Handle SOCKS5 auth if needed
+	if m.socksAuth {
+		_, authData, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if len(authData) < 3 {
+			return
+		}
+		// Accept any SOCKS5 credentials for this test
+		if err := conn.Write(ctx, websocket.MessageBinary, []byte{0x01, 0x00}); err != nil {
+			return
+		}
+	}
+
+	// Read connect request
+	_, reqData, err := conn.Read(ctx)
+	if err != nil {
+		return
+	}
+	if len(reqData) < 4 {
+		return
+	}
+
+	// Send reply with bound address (0.0.0.0:0)
+	reply := []byte{
+		Version,
+		ReplySucceeded,
+		0x00,         // reserved
+		AddrTypeIPv4, // address type
+		0, 0, 0, 0,   // IP
+		0, 0, // port
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, reply); err != nil {
+		return
+	}
+
+	// Echo loop
+	for {
+		_, echoData, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if err := conn.Write(ctx, websocket.MessageBinary, echoData); err != nil {
+			return
+		}
+	}
+}
+
+func (m *mockWebSocketServerWithHTTPAuthAndSOCKS5) URL() string {
+	return "ws" + m.server.URL[4:] + "/socks5"
+}
+
+func (m *mockWebSocketServerWithHTTPAuthAndSOCKS5) Close() {
+	m.server.Close()
+}
+
+func TestClientConnectWithHTTPBasicAuth(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuthAndSOCKS5(t, "httpuser", "httppass", false)
+	defer srv.Close()
+
+	// Create client with HTTP Basic Auth credentials
+	client := NewClientWithOptions(srv.URL(), nil, 5*time.Second, 0, ClientOptions{
+		WSUsername: "httpuser",
+		WSPassword: "httppass",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := client.Connect(ctx, "example.com:80")
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer conn.Close()
+
+	// Test data round-trip
+	testData := []byte("hello via http basic auth")
+	if _, err := conn.Write(testData); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	buf := make([]byte, len(testData))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if string(buf) != string(testData) {
+		t.Errorf("got %q, want %q", buf, testData)
+	}
+}
+
+func TestClientConnectWithHTTPBasicAuthAndSOCKS5Auth(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuthAndSOCKS5(t, "httpuser", "httppass", true)
+	defer srv.Close()
+
+	// Create client with both HTTP Basic Auth and SOCKS5 auth
+	socksAuth := &UserPassAuth{Username: "socksuser", Password: "sockspass"}
+	client := NewClientWithOptions(srv.URL(), socksAuth, 5*time.Second, 0, ClientOptions{
+		WSUsername: "httpuser",
+		WSPassword: "httppass",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := client.Connect(ctx, "example.com:443")
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer conn.Close()
+
+	// Test data round-trip
+	testData := []byte("hello via dual auth")
+	if _, err := conn.Write(testData); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	buf := make([]byte, len(testData))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if string(buf) != string(testData) {
+		t.Errorf("got %q, want %q", buf, testData)
+	}
+}
+
+func TestClientConnectWithWrongHTTPBasicAuth(t *testing.T) {
+	srv := newMockWebSocketServerWithHTTPAuthAndSOCKS5(t, "httpuser", "httppass", false)
+	defer srv.Close()
+
+	// Create client with wrong HTTP Basic Auth credentials
+	client := NewClientWithOptions(srv.URL(), nil, 5*time.Second, 0, ClientOptions{
+		WSUsername: "wrong",
+		WSPassword: "wrong",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := client.Connect(ctx, "example.com:80")
+	if err == nil {
+		t.Error("expected error for wrong HTTP Basic Auth credentials")
+	}
+}
