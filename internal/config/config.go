@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -43,6 +44,8 @@ type SOCKS5Config struct {
 	Password  string        `yaml:"password"`
 	Timeout   time.Duration `yaml:"timeout"`
 	KeepAlive time.Duration `yaml:"keepalive"`
+	Transport string        `yaml:"transport"` // "tcp" (default) or "websocket"
+	WSPath    string        `yaml:"ws_path"`   // WebSocket path (default: "/socks5")
 }
 
 // RouteConfig holds a single route configuration
@@ -125,6 +128,12 @@ func (c *Config) setDefaults() {
 	if c.SOCKS5.KeepAlive == 0 {
 		c.SOCKS5.KeepAlive = 60 * time.Second
 	}
+	if c.SOCKS5.Transport == "" {
+		c.SOCKS5.Transport = "tcp"
+	}
+	if c.SOCKS5.WSPath == "" {
+		c.SOCKS5.WSPath = "/socks5"
+	}
 
 	// NAT defaults
 	if c.NAT.TableSize == 0 {
@@ -202,12 +211,35 @@ func (c *Config) Validate() error {
 	if c.SOCKS5.Server == "" {
 		return fmt.Errorf("socks5.server is required")
 	}
-	host, port, err := net.SplitHostPort(c.SOCKS5.Server)
-	if err != nil {
-		return fmt.Errorf("invalid socks5.server format: %w", err)
+
+	// Check if server is a WebSocket URL
+	if strings.HasPrefix(c.SOCKS5.Server, "ws://") || strings.HasPrefix(c.SOCKS5.Server, "wss://") {
+		u, err := url.Parse(c.SOCKS5.Server)
+		if err != nil {
+			return fmt.Errorf("invalid socks5.server URL: %w", err)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("socks5.server URL must include host")
+		}
+	} else {
+		// Traditional host:port format
+		host, port, err := net.SplitHostPort(c.SOCKS5.Server)
+		if err != nil {
+			return fmt.Errorf("invalid socks5.server format: %w", err)
+		}
+		if host == "" || port == "" {
+			return fmt.Errorf("socks5.server must include host and port")
+		}
 	}
-	if host == "" || port == "" {
-		return fmt.Errorf("socks5.server must include host and port")
+
+	// Validate transport
+	if c.SOCKS5.Transport != "tcp" && c.SOCKS5.Transport != "websocket" {
+		return fmt.Errorf("socks5.transport must be 'tcp' or 'websocket'")
+	}
+
+	// Validate ws_path
+	if c.SOCKS5.WSPath != "" && !strings.HasPrefix(c.SOCKS5.WSPath, "/") {
+		return fmt.Errorf("socks5.ws_path must start with '/'")
 	}
 
 	// Validate routes

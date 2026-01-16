@@ -23,6 +23,7 @@ socks5:
   # SOCKS5 proxy server address
   # For Docker on Mac: host.docker.internal:1080
   # For local testing: 127.0.0.1:1080
+  # For WebSocket: Use wss:// URL (e.g., wss://relay.example.com:8443/socks5)
   server: 127.0.0.1:1080
   # Username for authentication (leave empty for no auth)
   username: ""
@@ -32,6 +33,13 @@ socks5:
   timeout: 30s
   # TCP keepalive interval
   keepalive: 60s
+  # Transport type: "tcp" (default) or "websocket"
+  # Use "websocket" to tunnel SOCKS5 over WebSocket when raw TCP is blocked
+  # If server is a ws:// or wss:// URL, transport is auto-detected
+  transport: tcp
+  # WebSocket path (default: "/socks5")
+  # Only used when transport is "websocket" and server is not a full URL
+  ws_path: /socks5
 
 # Routes to forward through the SOCKS5 proxy
 routes:

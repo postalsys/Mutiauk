@@ -285,7 +285,16 @@ func runConnectivityTests(cfg *config.Config) ConnectivityStatus {
 			Password: cfg.SOCKS5.Password,
 		}
 	}
-	client := socks5.NewClient(cfg.SOCKS5.Server, auth, cfg.SOCKS5.Timeout, cfg.SOCKS5.KeepAlive)
+	client := socks5.NewClientWithOptions(
+		cfg.SOCKS5.Server,
+		auth,
+		cfg.SOCKS5.Timeout,
+		cfg.SOCKS5.KeepAlive,
+		socks5.ClientOptions{
+			Transport: cfg.SOCKS5.Transport,
+			WSPath:    cfg.SOCKS5.WSPath,
+		},
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

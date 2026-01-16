@@ -259,11 +259,15 @@ func (s *Server) initNetwork(tunCfg tun.Config) error {
 // createSOCKS5Client creates a SOCKS5 client from current config
 func (s *Server) createSOCKS5Client() *socks5.Client {
 	auth := socks5.NewAuthenticator(s.cfg.SOCKS5.Username, s.cfg.SOCKS5.Password)
-	return socks5.NewClient(
+	return socks5.NewClientWithOptions(
 		s.cfg.SOCKS5.Server,
 		auth,
 		s.cfg.SOCKS5.Timeout,
 		s.cfg.SOCKS5.KeepAlive,
+		socks5.ClientOptions{
+			Transport: s.cfg.SOCKS5.Transport,
+			WSPath:    s.cfg.SOCKS5.WSPath,
+		},
 	)
 }
 
@@ -372,11 +376,15 @@ func (s *Server) Reload(cfg *config.Config) error {
 	defer s.mu.Unlock()
 
 	if s.socks5ConfigChanged(cfg) {
-		s.network.socks5Client = socks5.NewClient(
+		s.network.socks5Client = socks5.NewClientWithOptions(
 			cfg.SOCKS5.Server,
 			socks5.NewAuthenticator(cfg.SOCKS5.Username, cfg.SOCKS5.Password),
 			cfg.SOCKS5.Timeout,
 			cfg.SOCKS5.KeepAlive,
+			socks5.ClientOptions{
+				Transport: cfg.SOCKS5.Transport,
+				WSPath:    cfg.SOCKS5.WSPath,
+			},
 		)
 		s.network.tcpForwarder.UpdateClient(s.network.socks5Client)
 		s.network.udpForwarder.UpdateClient(s.network.socks5Client)
@@ -396,7 +404,9 @@ func (s *Server) Reload(cfg *config.Config) error {
 func (s *Server) socks5ConfigChanged(cfg *config.Config) bool {
 	return cfg.SOCKS5.Server != s.cfg.SOCKS5.Server ||
 		cfg.SOCKS5.Username != s.cfg.SOCKS5.Username ||
-		cfg.SOCKS5.Password != s.cfg.SOCKS5.Password
+		cfg.SOCKS5.Password != s.cfg.SOCKS5.Password ||
+		cfg.SOCKS5.Transport != s.cfg.SOCKS5.Transport ||
+		cfg.SOCKS5.WSPath != s.cfg.SOCKS5.WSPath
 }
 
 // Stop stops the daemon server

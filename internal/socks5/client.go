@@ -6,8 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
+)
+
+// Transport type for SOCKS5 connections
+const (
+	TransportTCP       = "tcp"
+	TransportWebSocket = "websocket"
 )
 
 // Client connects to a SOCKS5 proxy
@@ -16,10 +24,23 @@ type Client struct {
 	Auth       Authenticator
 	Timeout    time.Duration
 	KeepAlive  time.Duration
+	Transport  string // "tcp" (default) or "websocket"
+	WSPath     string // WebSocket path (default: "/socks5")
+}
+
+// ClientOptions contains optional configuration for the SOCKS5 client
+type ClientOptions struct {
+	Transport string // "tcp" (default) or "websocket"
+	WSPath    string // WebSocket path (default: "/socks5")
 }
 
 // NewClient creates a new SOCKS5 client
 func NewClient(serverAddr string, auth Authenticator, timeout, keepAlive time.Duration) *Client {
+	return NewClientWithOptions(serverAddr, auth, timeout, keepAlive, ClientOptions{})
+}
+
+// NewClientWithOptions creates a new SOCKS5 client with additional options
+func NewClientWithOptions(serverAddr string, auth Authenticator, timeout, keepAlive time.Duration, opts ClientOptions) *Client {
 	if auth == nil {
 		auth = &NoAuth{}
 	}
@@ -30,11 +51,23 @@ func NewClient(serverAddr string, auth Authenticator, timeout, keepAlive time.Du
 		keepAlive = 60 * time.Second
 	}
 
+	transport := opts.Transport
+	if transport == "" {
+		transport = TransportTCP
+	}
+
+	wsPath := opts.WSPath
+	if wsPath == "" {
+		wsPath = "/socks5"
+	}
+
 	return &Client{
 		ServerAddr: serverAddr,
 		Auth:       auth,
 		Timeout:    timeout,
 		KeepAlive:  keepAlive,
+		Transport:  transport,
+		WSPath:     wsPath,
 	}
 }
 
@@ -196,8 +229,20 @@ func (c *Client) ICMPAssociate(ctx context.Context, destIP net.IP) (*ICMPRelay, 
 	}, nil
 }
 
-// dialServer connects to the SOCKS5 server
+// dialServer connects to the SOCKS5 server using the configured transport.
 func (c *Client) dialServer(ctx context.Context) (net.Conn, error) {
+	// Check if server address is a WebSocket URL
+	if c.isWebSocketURL() {
+		return dialWebSocket(ctx, c.ServerAddr, c.Timeout)
+	}
+
+	// Use explicit transport setting
+	if c.Transport == TransportWebSocket {
+		wsURL := c.buildWebSocketURL()
+		return dialWebSocket(ctx, wsURL, c.Timeout)
+	}
+
+	// Default: TCP connection
 	dialer := &net.Dialer{
 		Timeout:   c.Timeout,
 		KeepAlive: c.KeepAlive,
@@ -209,6 +254,38 @@ func (c *Client) dialServer(ctx context.Context) (net.Conn, error) {
 	}
 
 	return conn, nil
+}
+
+// isWebSocketURL checks if ServerAddr is a WebSocket URL.
+func (c *Client) isWebSocketURL() bool {
+	return strings.HasPrefix(c.ServerAddr, "ws://") || strings.HasPrefix(c.ServerAddr, "wss://")
+}
+
+// buildWebSocketURL constructs a WebSocket URL from ServerAddr and WSPath.
+// If ServerAddr doesn't have a scheme, defaults to wss://.
+func (c *Client) buildWebSocketURL() string {
+	if c.isWebSocketURL() {
+		return c.ServerAddr
+	}
+
+	// Convert http/https URLs to ws/wss
+	if strings.Contains(c.ServerAddr, "://") {
+		u, err := url.Parse(c.ServerAddr)
+		if err == nil {
+			if u.Scheme == "http" {
+				u.Scheme = "ws"
+			} else {
+				u.Scheme = "wss"
+			}
+			if u.Path == "" {
+				u.Path = c.WSPath
+			}
+			return u.String()
+		}
+	}
+
+	// No scheme - build URL with wss:// and path
+	return "wss://" + c.ServerAddr + c.WSPath
 }
 
 // handshake performs the SOCKS5 handshake including authentication
@@ -321,7 +398,7 @@ func (c *Client) readReply(conn net.Conn) (*Address, error) {
 		}
 		addr.IP = make(net.IP, 4)
 		copy(addr.IP, buf[:4])
-		addr.Port = uint16(buf[4])<<8 | uint16(buf[5])
+		addr.Port = binary.BigEndian.Uint16(buf[4:6])
 
 	case AddrTypeIPv6:
 		buf := make([]byte, 18)
@@ -330,7 +407,7 @@ func (c *Client) readReply(conn net.Conn) (*Address, error) {
 		}
 		addr.IP = make(net.IP, 16)
 		copy(addr.IP, buf[:16])
-		addr.Port = uint16(buf[16])<<8 | uint16(buf[17])
+		addr.Port = binary.BigEndian.Uint16(buf[16:18])
 
 	case AddrTypeDomain:
 		lenBuf := make([]byte, 1)
@@ -343,7 +420,7 @@ func (c *Client) readReply(conn net.Conn) (*Address, error) {
 			return nil, fmt.Errorf("failed to read domain: %w", err)
 		}
 		addr.Domain = string(buf[:domainLen])
-		addr.Port = uint16(buf[domainLen])<<8 | uint16(buf[domainLen+1])
+		addr.Port = binary.BigEndian.Uint16(buf[domainLen:])
 
 	default:
 		return nil, fmt.Errorf("unknown address type: %d", addr.Type)
