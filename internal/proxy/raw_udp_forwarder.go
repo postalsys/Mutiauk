@@ -4,11 +4,20 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/postalsys/mutiauk/internal/socks5"
 	"go.uber.org/zap"
 )
+
+// udpBufPool reuses 64KB buffers for UDP packet handling to reduce GC pressure.
+var udpBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, DefaultUDPBufferSize)
+		return &buf
+	},
+}
 
 // RawUDPForwarder handles raw UDP packet forwarding through SOCKS5.
 type RawUDPForwarder struct {
@@ -66,19 +75,26 @@ func (f *RawUDPForwarder) HandleRawUDP(ctx context.Context, srcIP, dstIP net.IP,
 
 	f.logger.Debug("waiting for UDP response")
 	relay.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, DefaultUDPBufferSize)
+	bufp := udpBufPool.Get().(*[]byte)
+	buf := *bufp
 	n, remoteAddr, err := relay.Receive(buf)
 	if err != nil {
+		udpBufPool.Put(bufp)
 		f.logger.Debug("UDP receive timeout or error", zap.Error(err))
 		return nil, nil
 	}
+
+	// Copy the response before returning the buffer to the pool
+	response := make([]byte, n)
+	copy(response, buf[:n])
+	udpBufPool.Put(bufp)
 
 	f.logger.Debug("received UDP response via SOCKS5",
 		zap.String("remote", remoteAddr.String()),
 		zap.Int("len", n),
 	)
 
-	return buf[:n], nil
+	return response, nil
 }
 
 // Close closes the relay pool.

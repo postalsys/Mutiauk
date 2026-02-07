@@ -61,6 +61,11 @@ func (w *Watcher) Watch(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			mu.Lock()
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			mu.Unlock()
 			w.fsWatcher.Close()
 			return ctx.Err()
 

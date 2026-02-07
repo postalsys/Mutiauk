@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/postalsys/mutiauk/internal/tun"
@@ -30,6 +31,12 @@ type TCPHandler interface {
 // destinations before the TCP handshake is completed.
 type TCPPreConnector interface {
 	PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr) (net.Conn, error)
+}
+
+// TCPPendingCleaner cleans up pending pre-established connections that were
+// never consumed (e.g., when CreateEndpoint fails after a successful PreConnect).
+type TCPPendingCleaner interface {
+	CleanupPending(srcAddr, dstAddr net.Addr)
 }
 
 // UDPHandler handles UDP packets
@@ -74,6 +81,11 @@ type Config struct {
 	Logger        *zap.Logger
 }
 
+const (
+	maxConcurrentUDP  = 1024
+	maxConcurrentICMP = 256
+)
+
 // Stack wraps gVisor's network stack
 type Stack struct {
 	stack       *stack.Stack
@@ -82,6 +94,11 @@ type Stack struct {
 	interceptEP *interceptEndpoint
 	cfg         Config
 	logger      *zap.Logger
+
+	// Concurrency control
+	udpSem  chan struct{} // Limits concurrent UDP goroutines
+	icmpSem chan struct{} // Limits concurrent ICMP goroutines
+	tcpWg   sync.WaitGroup // Tracks in-flight TCP handler goroutines
 }
 
 const (
@@ -95,9 +112,11 @@ func New(tunDev tun.Device, cfg Config) (*Stack, error) {
 	}
 
 	s := &Stack{
-		tunDev: tunDev,
-		cfg:    cfg,
-		logger: cfg.Logger,
+		tunDev:  tunDev,
+		cfg:     cfg,
+		logger:  cfg.Logger,
+		udpSem:  make(chan struct{}, maxConcurrentUDP),
+		icmpSem: make(chan struct{}, maxConcurrentICMP),
 	}
 
 	// Create the gVisor stack
@@ -208,7 +227,8 @@ func (s *Stack) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// HandleUDPPacket implements UDPPacketHandler for the intercept endpoint
+// HandleUDPPacket implements UDPPacketHandler for the intercept endpoint.
+// parentCtx is set by Run() and used for shutdown propagation.
 func (s *Stack) HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) {
 	s.logger.Debug("UDP packet received for forwarding",
 		zap.String("src", fmt.Sprintf("%s:%d", srcIP, srcPort)),
@@ -221,8 +241,20 @@ func (s *Stack) HandleUDPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, pa
 		return
 	}
 
+	// Rate-limit concurrent UDP goroutines
+	select {
+	case s.udpSem <- struct{}{}:
+	default:
+		s.logger.Debug("UDP semaphore full, dropping packet",
+			zap.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+		)
+		return
+	}
+
 	// Forward through SOCKS5 in a goroutine to not block
 	go func() {
+		defer func() { <-s.udpSem }()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -270,8 +302,20 @@ func (s *Stack) HandleICMPPacket(srcIP, dstIP net.IP, id, seq uint16, payload []
 		return
 	}
 
+	// Rate-limit concurrent ICMP goroutines
+	select {
+	case s.icmpSem <- struct{}{}:
+	default:
+		s.logger.Debug("ICMP semaphore full, dropping packet",
+			zap.String("dst", dstIP.String()),
+		)
+		return
+	}
+
 	// Forward through SOCKS5 in a goroutine to not block
 	go func() {
+		defer func() { <-s.icmpSem }()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -344,6 +388,10 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 			zap.String("dst", fmt.Sprintf("%s:%d", id.LocalAddress, id.LocalPort)),
 			zap.String("error", tcpErr.String()),
 		)
+		// Clean up any pre-established connection that will never be consumed
+		if cleaner, ok := s.cfg.TCPHandler.(TCPPendingCleaner); ok {
+			cleaner.CleanupPending(srcAddr, dstAddr)
+		}
 		r.Complete(true)
 		return
 	}
@@ -358,7 +406,9 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 	)
 
 	if s.cfg.TCPHandler != nil {
+		s.tcpWg.Add(1)
 		go func() {
+			defer s.tcpWg.Done()
 			if err := s.cfg.TCPHandler.HandleTCP(ctx, conn, srcAddr, dstAddr); err != nil {
 				s.logger.Debug("TCP handler error",
 					zap.String("src", srcAddr.String()),
@@ -372,11 +422,13 @@ func (s *Stack) handleTCPForward(ctx context.Context, r *tcp.ForwarderRequest) {
 	}
 }
 
-// Close shuts down the stack
+// Close shuts down the stack and waits for in-flight handlers to finish
 func (s *Stack) Close() error {
 	if s.stack != nil {
 		s.stack.Close()
 	}
+	// Wait for all in-flight TCP handler goroutines to complete
+	s.tcpWg.Wait()
 	return nil
 }
 

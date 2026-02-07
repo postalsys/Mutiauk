@@ -62,11 +62,12 @@ func (p *Poller) fetchAndUpdate(ctx context.Context, onUpdate UpdateCallback) {
 	if err != nil {
 		p.mu.Lock()
 		p.lastError = err
+		previousCount := len(p.lastRoutes)
 		p.mu.Unlock()
 
 		p.logger.Warn("failed to fetch autoroutes",
 			zap.Error(err),
-			zap.Int("keeping_previous", len(p.lastRoutes)),
+			zap.Int("keeping_previous", previousCount),
 		)
 		// Keep previous routes on error
 		return

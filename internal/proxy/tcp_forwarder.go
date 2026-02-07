@@ -65,6 +65,15 @@ func (f *TCPForwarder) PreConnect(ctx context.Context, srcAddr, dstAddr net.Addr
 	return proxyConn, nil
 }
 
+// CleanupPending removes and closes a pending pre-established connection.
+// Called when CreateEndpoint fails after a successful PreConnect.
+func (f *TCPForwarder) CleanupPending(srcAddr, dstAddr net.Addr) {
+	key := connKey(srcAddr, dstAddr)
+	if pending, ok := f.pendingConns.LoadAndDelete(key); ok {
+		pending.(net.Conn).Close()
+	}
+}
+
 // HandleTCP handles a TCP connection from the TUN interface.
 func (f *TCPForwarder) HandleTCP(ctx context.Context, conn net.Conn, srcAddr, dstAddr net.Addr) error {
 	defer conn.Close()

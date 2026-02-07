@@ -13,7 +13,7 @@ import (
 
 // ICMPForwarder forwards ICMP echo requests through a SOCKS5 proxy.
 type ICMPForwarder struct {
-	client  *socks5.Client
+	clientHolder
 	logger  *zap.Logger
 	timeout time.Duration
 
@@ -22,7 +22,8 @@ type ICMPForwarder struct {
 	sessions map[icmpSessionKey]*icmpSession
 
 	// Shutdown
-	done chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // icmpSessionKey uniquely identifies an ICMP session.
@@ -45,11 +46,11 @@ func NewICMPForwarder(client *socks5.Client, logger *zap.Logger, timeout time.Du
 	}
 
 	f := &ICMPForwarder{
-		client:   client,
-		logger:   logger,
-		timeout:  timeout,
-		sessions: make(map[icmpSessionKey]*icmpSession),
-		done:     make(chan struct{}),
+		clientHolder: clientHolder{client: client},
+		logger:       logger,
+		timeout:      timeout,
+		sessions:     make(map[icmpSessionKey]*icmpSession),
+		done:         make(chan struct{}),
 	}
 
 	// Start cleanup goroutine
@@ -113,7 +114,8 @@ func (f *ICMPForwarder) getOrCreateSession(ctx context.Context, dstIP net.IP, id
 	}
 
 	// Create ICMP relay through SOCKS5
-	relay, err := f.client.ICMPAssociate(ctx, dstIP)
+	client := f.clientHolder.Get()
+	relay, err := client.ICMPAssociate(ctx, dstIP)
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +202,11 @@ func (f *ICMPForwarder) cleanup() {
 	}
 }
 
-// Close closes all sessions and stops the forwarder.
+// Close closes all sessions and stops the forwarder. Safe to call multiple times.
 func (f *ICMPForwarder) Close() error {
-	// Signal cleanup goroutine to stop
-	close(f.done)
+	f.closeOnce.Do(func() {
+		close(f.done)
+	})
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -214,5 +217,19 @@ func (f *ICMPForwarder) Close() error {
 	}
 
 	return nil
+}
+
+// UpdateClient updates the SOCKS5 client and clears existing sessions.
+func (f *ICMPForwarder) UpdateClient(client *socks5.Client) {
+	f.clientHolder.Set(client)
+
+	// Clear existing sessions since they use the old client
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for key, session := range f.sessions {
+		session.relay.Close()
+		delete(f.sessions, key)
+	}
 }
 

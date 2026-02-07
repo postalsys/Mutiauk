@@ -778,12 +778,22 @@ func TestRelayPool_GetOrCreate_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Due to mutex, only one create should succeed
+	// With lock-free creation pattern, multiple goroutines may race to create,
+	// but only one relay is stored (others are closed). At least 1 create call
+	// is expected, and the pool should have exactly 1 entry.
 	mu.Lock()
 	count := createCount
 	mu.Unlock()
-	if count != 1 {
-		t.Errorf("expected 1 create call, got %d", count)
+	if count < 1 {
+		t.Errorf("expected at least 1 create call, got %d", count)
+	}
+
+	// Verify only one entry is stored
+	pool.mu.Lock()
+	entryCount := len(pool.entries)
+	pool.mu.Unlock()
+	if entryCount != 1 {
+		t.Errorf("expected 1 pool entry, got %d", entryCount)
 	}
 }
 

@@ -45,7 +45,8 @@ type Entry struct {
 	State     ConnState
 	TTL       time.Duration
 
-	mu sync.Mutex // Protects State and LastSeen
+	mu        sync.Mutex // Protects State and LastSeen
+	closeOnce sync.Once  // Guards Close() against double-call
 }
 
 // Touch updates the last seen time
@@ -77,14 +78,16 @@ func (e *Entry) IsExpired() bool {
 	return time.Since(e.LastSeen) > e.TTL
 }
 
-// Close closes the entry's connections
+// Close closes the entry's connections. Safe to call multiple times.
 func (e *Entry) Close() error {
-	e.SetState(ConnStateClosed)
-	if e.ProxyConn != nil {
-		return e.ProxyConn.Close()
-	}
-	// UDPRelay close is handled by the caller
-	return nil
+	var err error
+	e.closeOnce.Do(func() {
+		e.SetState(ConnStateClosed)
+		if e.ProxyConn != nil {
+			err = e.ProxyConn.Close()
+		}
+	})
+	return err
 }
 
 // Key generates a unique key for this entry

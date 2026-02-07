@@ -38,18 +38,33 @@ func NewRelayPool(ttl time.Duration, logger *zap.Logger) *RelayPool {
 }
 
 // GetOrCreate returns an existing relay for the key, or creates a new one.
+// The create callback runs outside the lock to avoid blocking other requests
+// during potentially slow network I/O (SOCKS5 UDP ASSOCIATE handshake).
 func (p *RelayPool) GetOrCreate(ctx context.Context, key string, create func(context.Context) (*socks5.UDPRelay, error)) (*socks5.UDPRelay, error) {
+	// Fast path: check if relay already exists
+	p.mu.Lock()
+	if entry, ok := p.entries[key]; ok {
+		entry.lastUsed = time.Now()
+		p.mu.Unlock()
+		return entry.relay, nil
+	}
+	p.mu.Unlock()
+
+	// Slow path: create relay outside the lock (network I/O)
+	relay, err := create(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Re-acquire lock and check again (another goroutine may have created it)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if entry, ok := p.entries[key]; ok {
+		// Another goroutine created it while we were doing I/O; close ours
+		relay.Close()
 		entry.lastUsed = time.Now()
 		return entry.relay, nil
-	}
-
-	relay, err := create(ctx)
-	if err != nil {
-		return nil, err
 	}
 
 	p.entries[key] = &relayEntry{

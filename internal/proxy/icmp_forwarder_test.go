@@ -24,7 +24,7 @@ func TestNewICMPForwarder(t *testing.T) {
 	if forwarder == nil {
 		t.Fatal("NewICMPForwarder returned nil")
 	}
-	if forwarder.client != client {
+	if forwarder.clientHolder.Get() != client {
 		t.Error("client not set correctly")
 	}
 	if forwarder.logger != logger {
@@ -83,18 +83,9 @@ func TestICMPForwarder_Close_Multiple(t *testing.T) {
 
 	forwarder := NewICMPForwarder(client, logger, time.Second)
 
-	// First close should succeed
+	// Multiple closes should not panic (protected by sync.Once)
 	forwarder.Close()
-
-	// Second close should panic (closing already closed channel)
-	// but we should handle this gracefully in production code
-	// For now, this test documents the current behavior
-	defer func() {
-		if r := recover(); r == nil {
-			t.Log("Note: Multiple Close() calls cause panic - consider adding sync.Once")
-		}
-	}()
-
+	forwarder.Close()
 	forwarder.Close()
 }
 
@@ -278,23 +269,13 @@ func TestICMPForwarder_ConcurrentClose(t *testing.T) {
 	forwarder := NewICMPForwarder(client, logger, time.Second)
 
 	var wg sync.WaitGroup
-	closeCalled := make(chan struct{}, 1)
 
-	// Only one goroutine should successfully close
+	// Concurrent closes should not panic (protected by sync.Once)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					// Expected for subsequent closes
-				}
-			}()
 			forwarder.Close()
-			select {
-			case closeCalled <- struct{}{}:
-			default:
-			}
 		}()
 	}
 

@@ -45,6 +45,7 @@ func newSOCKS5Address(ip net.IP, port uint16) *socks5.Address {
 
 // bidirectionalCopy performs bidirectional data copy between two connections.
 // It returns when either direction completes or the context is canceled.
+// Both connections are closed to unblock any in-flight io.Copy goroutines.
 func bidirectionalCopy(ctx context.Context, local, remote net.Conn, bufferSize int) error {
 	errCh := make(chan error, 2)
 
@@ -60,8 +61,12 @@ func bidirectionalCopy(ctx context.Context, local, remote net.Conn, bufferSize i
 
 	select {
 	case <-ctx.Done():
+		local.Close()
+		remote.Close()
 		return ctx.Err()
 	case err := <-errCh:
+		local.Close()
+		remote.Close()
 		return err
 	}
 }

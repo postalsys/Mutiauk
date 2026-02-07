@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/postalsys/mutiauk/internal/api"
@@ -65,7 +66,7 @@ type networkStack struct {
 
 // Server is the main daemon server
 type Server struct {
-	cfg        *config.Config
+	cfg        atomic.Pointer[config.Config]
 	configPath string
 	logger     *zap.Logger
 
@@ -83,11 +84,12 @@ type Server struct {
 
 // New creates a new daemon server
 func New(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, error) {
-	return &Server{
-		cfg:        cfg,
+	s := &Server{
 		configPath: configPath,
 		logger:     logger,
-	}, nil
+	}
+	s.cfg.Store(cfg)
+	return s, nil
 }
 
 // Run starts the daemon server
@@ -113,10 +115,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.startServices(ctx)
 
+	cfg := s.cfg.Load()
 	s.logger.Info("daemon started",
-		zap.String("tun", s.cfg.TUN.Name),
-		zap.String("socks5", s.cfg.SOCKS5.Server),
-		zap.Bool("autoroutes", s.cfg.AutoRoutes.Enabled),
+		zap.String("tun", cfg.TUN.Name),
+		zap.String("socks5", cfg.SOCKS5.Server),
+		zap.Bool("autoroutes", cfg.AutoRoutes.Enabled),
 	)
 
 	return s.network.netStack.Run(ctx)
@@ -139,8 +142,10 @@ func (s *Server) setRunning(running bool) error {
 
 // startServices starts API server, routes, autoroutes poller, and NAT GC
 func (s *Server) startServices(ctx context.Context) {
-	if s.cfg.Daemon.SocketPath != "" {
-		s.apiServer = api.NewServer(s.cfg.Daemon.SocketPath, s, s.logger)
+	cfg := s.cfg.Load()
+
+	if cfg.Daemon.SocketPath != "" {
+		s.apiServer = api.NewServer(cfg.Daemon.SocketPath, s, s.logger)
 		if err := s.apiServer.Start(ctx); err != nil {
 			s.logger.Warn("failed to start API server", zap.Error(err))
 		}
@@ -150,28 +155,30 @@ func (s *Server) startServices(ctx context.Context) {
 		s.logger.Warn("failed to apply some routes", zap.Error(err))
 	}
 
-	if s.cfg.AutoRoutes.Enabled {
+	if cfg.AutoRoutes.Enabled {
 		s.startAutoRoutes(ctx)
 	}
 
 	s.network.natTable.StartGC(ctx, nat.GCConfig{
-		Interval: s.cfg.NAT.GCInterval,
+		Interval: cfg.NAT.GCInterval,
 		Logger:   s.logger,
 	})
 }
 
 // initialize sets up all components
 func (s *Server) initialize() error {
-	tunCfg, err := s.parseTUNConfig()
+	cfg := s.cfg.Load()
+
+	tunCfg, err := s.parseTUNConfig(cfg)
 	if err != nil {
 		return err
 	}
 
-	if err := s.initNetwork(tunCfg); err != nil {
+	if err := s.initNetwork(cfg, tunCfg); err != nil {
 		return err
 	}
 
-	s.routeMgr, err = route.NewManager(s.cfg.TUN.Name, s.logger)
+	s.routeMgr, err = route.NewManager(cfg.TUN.Name, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create route manager: %w", err)
 	}
@@ -180,15 +187,15 @@ func (s *Server) initialize() error {
 }
 
 // parseTUNConfig parses TUN configuration from config
-func (s *Server) parseTUNConfig() (tun.Config, error) {
+func (s *Server) parseTUNConfig(cfg *config.Config) (tun.Config, error) {
 	tunCfg := tun.Config{
-		Name:    s.cfg.TUN.Name,
-		MTU:     s.cfg.TUN.MTU,
+		Name:    cfg.TUN.Name,
+		MTU:     cfg.TUN.MTU,
 		Persist: false,
 	}
 
-	if s.cfg.TUN.Address != "" {
-		ip, ipNet, err := net.ParseCIDR(s.cfg.TUN.Address)
+	if cfg.TUN.Address != "" {
+		ip, ipNet, err := net.ParseCIDR(cfg.TUN.Address)
 		if err != nil {
 			return tunCfg, fmt.Errorf("invalid TUN address: %w", err)
 		}
@@ -196,8 +203,8 @@ func (s *Server) parseTUNConfig() (tun.Config, error) {
 		tunCfg.Netmask = ipNet.Mask
 	}
 
-	if s.cfg.TUN.Address6 != "" {
-		ip, ipNet, err := net.ParseCIDR(s.cfg.TUN.Address6)
+	if cfg.TUN.Address6 != "" {
+		ip, ipNet, err := net.ParseCIDR(cfg.TUN.Address6)
 		if err != nil {
 			return tunCfg, fmt.Errorf("invalid TUN IPv6 address: %w", err)
 		}
@@ -209,7 +216,7 @@ func (s *Server) parseTUNConfig() (tun.Config, error) {
 }
 
 // initNetwork initializes all network components
-func (s *Server) initNetwork(tunCfg tun.Config) error {
+func (s *Server) initNetwork(cfg *config.Config, tunCfg tun.Config) error {
 	var err error
 
 	s.network.tunDev, err = tun.New(tunCfg)
@@ -219,19 +226,19 @@ func (s *Server) initNetwork(tunCfg tun.Config) error {
 	s.logger.Info("TUN device created", zap.String("name", s.network.tunDev.Name()))
 
 	s.network.natTable = nat.NewTable(nat.Config{
-		MaxEntries: s.cfg.NAT.TableSize,
-		TCPTTL:     s.cfg.NAT.TCPTimeout,
-		UDPTTL:     s.cfg.NAT.UDPTimeout,
+		MaxEntries: cfg.NAT.TableSize,
+		TCPTTL:     cfg.NAT.TCPTimeout,
+		UDPTTL:     cfg.NAT.UDPTimeout,
 	})
 
 	s.network.socks5Client = s.createSOCKS5Client()
 	s.network.tcpForwarder = proxy.NewTCPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
 	s.network.udpForwarder = proxy.NewUDPForwarder(s.network.socks5Client, s.network.natTable, s.logger)
 	s.network.rawUDPForwarder = proxy.NewRawUDPForwarder(s.network.socks5Client, s.logger)
-	s.network.icmpForwarder = proxy.NewICMPForwarder(s.network.socks5Client, s.logger, s.cfg.SOCKS5.Timeout)
+	s.network.icmpForwarder = proxy.NewICMPForwarder(s.network.socks5Client, s.logger, cfg.SOCKS5.Timeout)
 
 	stackCfg := stack.Config{
-		MTU:           s.cfg.TUN.MTU,
+		MTU:           cfg.TUN.MTU,
 		TCPHandler:    s.network.tcpForwarder,
 		UDPHandler:    s.network.udpForwarder,
 		RawUDPHandler: s.network.rawUDPForwarder,
@@ -258,17 +265,18 @@ func (s *Server) initNetwork(tunCfg tun.Config) error {
 
 // createSOCKS5Client creates a SOCKS5 client from current config
 func (s *Server) createSOCKS5Client() *socks5.Client {
-	auth := socks5.NewAuthenticator(s.cfg.SOCKS5.Username, s.cfg.SOCKS5.Password)
+	cfg := s.cfg.Load()
+	auth := socks5.NewAuthenticator(cfg.SOCKS5.Username, cfg.SOCKS5.Password)
 	return socks5.NewClientWithOptions(
-		s.cfg.SOCKS5.Server,
+		cfg.SOCKS5.Server,
 		auth,
-		s.cfg.SOCKS5.Timeout,
-		s.cfg.SOCKS5.KeepAlive,
+		cfg.SOCKS5.Timeout,
+		cfg.SOCKS5.KeepAlive,
 		socks5.ClientOptions{
-			Transport:  s.cfg.SOCKS5.Transport,
-			WSPath:     s.cfg.SOCKS5.WSPath,
-			WSUsername: s.cfg.SOCKS5.Username, // Use same credentials for WebSocket Basic Auth
-			WSPassword: s.cfg.SOCKS5.Password,
+			Transport:  cfg.SOCKS5.Transport,
+			WSPath:     cfg.SOCKS5.WSPath,
+			WSUsername: cfg.SOCKS5.Username, // Use same credentials for WebSocket Basic Auth
+			WSPassword: cfg.SOCKS5.Password,
 		},
 	)
 }
@@ -280,6 +288,9 @@ func (s *Server) cleanup() {
 	}
 	if s.network.icmpForwarder != nil {
 		s.network.icmpForwarder.Close()
+	}
+	if s.network.rawUDPForwarder != nil {
+		s.network.rawUDPForwarder.Close()
 	}
 	if s.network.netStack != nil {
 		s.network.netStack.Close()
@@ -294,21 +305,23 @@ func (s *Server) cleanup() {
 
 // startAutoRoutes initializes and starts the autoroutes poller
 func (s *Server) startAutoRoutes(ctx context.Context) {
+	cfg := s.cfg.Load()
+
 	client := autoroutes.NewClient(
-		s.cfg.AutoRoutes.URL,
-		s.cfg.AutoRoutes.Timeout,
+		cfg.AutoRoutes.URL,
+		cfg.AutoRoutes.Timeout,
 		s.logger,
 	)
 	s.autoPoller = autoroutes.NewPoller(
 		client,
-		s.cfg.AutoRoutes.PollInterval,
-		s.cfg.TUN.Name,
+		cfg.AutoRoutes.PollInterval,
+		cfg.TUN.Name,
 		s.logger,
 	)
 
 	s.logger.Info("starting autoroutes poller",
-		zap.String("url", s.cfg.AutoRoutes.URL),
-		zap.Duration("interval", s.cfg.AutoRoutes.PollInterval),
+		zap.String("url", cfg.AutoRoutes.URL),
+		zap.Duration("interval", cfg.AutoRoutes.PollInterval),
 	)
 
 	go s.autoPoller.Start(ctx, s.onAutoRoutesUpdate)
@@ -325,9 +338,10 @@ func (s *Server) onAutoRoutesUpdate(routes []route.Route) {
 
 // getConfigRoutes returns routes from configuration
 func (s *Server) getConfigRoutes() []route.Route {
+	cfg := s.cfg.Load()
 	var routes []route.Route
 
-	for _, r := range s.cfg.Routes {
+	for _, r := range cfg.Routes {
 		if !r.Enabled {
 			continue
 		}
@@ -343,7 +357,7 @@ func (s *Server) getConfigRoutes() []route.Route {
 
 		routes = append(routes, route.Route{
 			Destination: ipNet,
-			Interface:   s.cfg.TUN.Name,
+			Interface:   cfg.TUN.Name,
 			Comment:     r.Comment,
 			Enabled:     true,
 		})
@@ -377,7 +391,8 @@ func (s *Server) Reload(cfg *config.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.socks5ConfigChanged(cfg) {
+	oldCfg := s.cfg.Load()
+	if s.socks5ConfigChanged(oldCfg, cfg) {
 		s.network.socks5Client = socks5.NewClientWithOptions(
 			cfg.SOCKS5.Server,
 			socks5.NewAuthenticator(cfg.SOCKS5.Username, cfg.SOCKS5.Password),
@@ -390,10 +405,12 @@ func (s *Server) Reload(cfg *config.Config) error {
 		)
 		s.network.tcpForwarder.UpdateClient(s.network.socks5Client)
 		s.network.udpForwarder.UpdateClient(s.network.socks5Client)
+		s.network.rawUDPForwarder.UpdateClient(s.network.socks5Client)
+		s.network.icmpForwarder.UpdateClient(s.network.socks5Client)
 		s.logger.Info("SOCKS5 client updated", zap.String("server", cfg.SOCKS5.Server))
 	}
 
-	s.cfg = cfg
+	s.cfg.Store(cfg)
 
 	if err := s.syncRoutes(); err != nil {
 		s.logger.Warn("failed to reapply routes", zap.Error(err))
@@ -403,12 +420,12 @@ func (s *Server) Reload(cfg *config.Config) error {
 }
 
 // socks5ConfigChanged checks if SOCKS5 configuration has changed
-func (s *Server) socks5ConfigChanged(cfg *config.Config) bool {
-	return cfg.SOCKS5.Server != s.cfg.SOCKS5.Server ||
-		cfg.SOCKS5.Username != s.cfg.SOCKS5.Username ||
-		cfg.SOCKS5.Password != s.cfg.SOCKS5.Password ||
-		cfg.SOCKS5.Transport != s.cfg.SOCKS5.Transport ||
-		cfg.SOCKS5.WSPath != s.cfg.SOCKS5.WSPath
+func (s *Server) socks5ConfigChanged(oldCfg, newCfg *config.Config) bool {
+	return newCfg.SOCKS5.Server != oldCfg.SOCKS5.Server ||
+		newCfg.SOCKS5.Username != oldCfg.SOCKS5.Username ||
+		newCfg.SOCKS5.Password != oldCfg.SOCKS5.Password ||
+		newCfg.SOCKS5.Transport != oldCfg.SOCKS5.Transport ||
+		newCfg.SOCKS5.WSPath != oldCfg.SOCKS5.WSPath
 }
 
 // Stop stops the daemon server
@@ -425,12 +442,12 @@ func (s *Server) Stop() error {
 // writePIDFile writes the PID to a file
 func (s *Server) writePIDFile() error {
 	pid := os.Getpid()
-	return os.WriteFile(s.cfg.Daemon.PIDFile, []byte(strconv.Itoa(pid)), 0644)
+	return os.WriteFile(s.cfg.Load().Daemon.PIDFile, []byte(strconv.Itoa(pid)), 0644)
 }
 
 // removePIDFile removes the PID file
 func (s *Server) removePIDFile() {
-	os.Remove(s.cfg.Daemon.PIDFile)
+	os.Remove(s.cfg.Load().Daemon.PIDFile)
 }
 
 // ReadPIDFile reads the PID from a file
@@ -451,15 +468,16 @@ func (s *Server) GetStatus() *api.StatusResult {
 	startTime := s.startTime
 	s.mu.RUnlock()
 
+	cfg := s.cfg.Load()
 	autoRouteCount := s.routeState.autoRouteCount()
 
 	result := &api.StatusResult{
 		Running:      running,
 		PID:          os.Getpid(),
 		ConfigPath:   s.configPath,
-		TUNName:      s.cfg.TUN.Name,
-		TUNAddress:   s.cfg.TUN.Address,
-		SOCKS5Server: s.cfg.SOCKS5.Server,
+		TUNName:      cfg.TUN.Name,
+		TUNAddress:   cfg.TUN.Address,
+		SOCKS5Server: cfg.SOCKS5.Server,
 		SOCKS5Status: "configured",
 	}
 
@@ -467,13 +485,13 @@ func (s *Server) GetStatus() *api.StatusResult {
 		result.Uptime = time.Since(startTime).Round(time.Second).String()
 	}
 
-	result.AutoRoutes.Enabled = s.cfg.AutoRoutes.Enabled
-	if s.cfg.AutoRoutes.Enabled {
-		result.AutoRoutes.URL = s.cfg.AutoRoutes.URL
+	result.AutoRoutes.Enabled = cfg.AutoRoutes.Enabled
+	if cfg.AutoRoutes.Enabled {
+		result.AutoRoutes.URL = cfg.AutoRoutes.URL
 		result.AutoRoutes.Count = autoRouteCount
 	}
 
-	result.RouteCount.Config = len(s.cfg.Routes)
+	result.RouteCount.Config = len(cfg.Routes)
 	result.RouteCount.Auto = autoRouteCount
 	result.RouteCount.Total = result.RouteCount.Config + result.RouteCount.Auto
 
@@ -482,12 +500,13 @@ func (s *Server) GetStatus() *api.StatusResult {
 
 // GetRoutes returns the list of active routes with source info
 func (s *Server) GetRoutes() []api.RouteInfo {
+	cfg := s.cfg.Load()
 	var routes []api.RouteInfo
 
-	for _, r := range s.cfg.Routes {
+	for _, r := range cfg.Routes {
 		routes = append(routes, api.RouteInfo{
 			Destination: r.Destination,
-			Interface:   s.cfg.TUN.Name,
+			Interface:   cfg.TUN.Name,
 			Comment:     r.Comment,
 			Source:      "config",
 			Enabled:     r.Enabled,
@@ -497,7 +516,7 @@ func (s *Server) GetRoutes() []api.RouteInfo {
 	for _, r := range s.routeState.getAutoRoutes() {
 		routes = append(routes, api.RouteInfo{
 			Destination: r.Destination.String(),
-			Interface:   s.cfg.TUN.Name,
+			Interface:   cfg.TUN.Name,
 			Comment:     r.Comment,
 			Source:      "auto",
 			Enabled:     true,
@@ -509,6 +528,8 @@ func (s *Server) GetRoutes() []api.RouteInfo {
 
 // AddRoute adds a route and optionally persists to config
 func (s *Server) AddRoute(dest, comment string, persist bool) error {
+	cfg := s.cfg.Load()
+
 	_, ipNet, err := net.ParseCIDR(dest)
 	if err != nil {
 		return fmt.Errorf("invalid CIDR: %w", err)
@@ -516,7 +537,7 @@ func (s *Server) AddRoute(dest, comment string, persist bool) error {
 
 	r := route.Route{
 		Destination: ipNet,
-		Interface:   s.cfg.TUN.Name,
+		Interface:   cfg.TUN.Name,
 		Comment:     comment,
 		Enabled:     true,
 	}
@@ -526,12 +547,13 @@ func (s *Server) AddRoute(dest, comment string, persist bool) error {
 	}
 
 	if persist {
-		s.cfg.Routes = append(s.cfg.Routes, config.RouteConfig{
+		cfg.Routes = append(cfg.Routes, config.RouteConfig{
 			Destination: dest,
 			Comment:     comment,
 			Enabled:     true,
 		})
-		if err := s.cfg.Save(s.configPath); err != nil {
+		s.cfg.Store(cfg)
+		if err := cfg.Save(s.configPath); err != nil {
 			return fmt.Errorf("route added but failed to save config: %w", err)
 		}
 	}
@@ -555,13 +577,15 @@ func (s *Server) RemoveRoute(dest string, persist bool) error {
 	}
 
 	if persist {
-		for i, rc := range s.cfg.Routes {
+		cfg := s.cfg.Load()
+		for i, rc := range cfg.Routes {
 			if rc.Destination == dest {
-				s.cfg.Routes = append(s.cfg.Routes[:i], s.cfg.Routes[i+1:]...)
+				cfg.Routes = append(cfg.Routes[:i], cfg.Routes[i+1:]...)
 				break
 			}
 		}
-		if err := s.cfg.Save(s.configPath); err != nil {
+		s.cfg.Store(cfg)
+		if err := cfg.Save(s.configPath); err != nil {
 			return fmt.Errorf("route removed but failed to save config: %w", err)
 		}
 	}
@@ -571,7 +595,9 @@ func (s *Server) RemoveRoute(dest string, persist bool) error {
 
 // TraceRoute traces routing for a destination
 func (s *Server) TraceRoute(dest string) (*api.RouteTraceResult, error) {
-	lookup, err := route.ResolveAndLookup(dest, s.cfg.TUN.Name)
+	cfg := s.cfg.Load()
+
+	lookup, err := route.ResolveAndLookup(dest, cfg.TUN.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -588,10 +614,10 @@ func (s *Server) TraceRoute(dest string) (*api.RouteTraceResult, error) {
 		result.Gateway = lookup.Gateway.String()
 	}
 
-	if lookup.IsMutiauk && s.cfg.AutoRoutes.URL != "" {
+	if lookup.IsMutiauk && cfg.AutoRoutes.URL != "" {
 		client := autoroutes.NewClient(
-			s.cfg.AutoRoutes.URL,
-			s.cfg.AutoRoutes.Timeout,
+			cfg.AutoRoutes.URL,
+			cfg.AutoRoutes.Timeout,
 			s.logger,
 		)
 

@@ -20,8 +20,9 @@ type wsConn struct {
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
 
-	mu       sync.RWMutex
-	deadline time.Time
+	mu             sync.RWMutex
+	deadlineCtx    context.Context
+	deadlineCancel context.CancelFunc
 
 	readMu sync.Mutex
 	reader io.Reader
@@ -66,18 +67,14 @@ func dialWebSocket(ctx context.Context, wsURL string, timeout time.Duration, use
 }
 
 // getContext returns a context for the current operation, respecting any deadline set.
-// Note: The context's cancel function is intentionally not returned. The context is
-// cancelled either when the deadline expires or when baseCtx is cancelled on Close().
 func (c *wsConn) getContext() context.Context {
 	c.mu.RLock()
-	deadline := c.deadline
-	c.mu.RUnlock()
+	defer c.mu.RUnlock()
 
-	if deadline.IsZero() {
-		return c.baseCtx
+	if c.deadlineCtx != nil {
+		return c.deadlineCtx
 	}
-	ctx, _ := context.WithDeadline(c.baseCtx, deadline)
-	return ctx
+	return c.baseCtx
 }
 
 // Read reads data from the WebSocket connection.
@@ -138,6 +135,14 @@ func (c *wsConn) Write(b []byte) (int, error) {
 
 // Close closes the WebSocket connection with a normal closure status.
 func (c *wsConn) Close() error {
+	c.mu.Lock()
+	if c.deadlineCancel != nil {
+		c.deadlineCancel()
+		c.deadlineCancel = nil
+		c.deadlineCtx = nil
+	}
+	c.mu.Unlock()
+	// Cancel baseCtx which also cancels all derived deadline contexts
 	c.baseCancel()
 	return c.conn.Close(websocket.StatusNormalClosure, "")
 }
@@ -154,9 +159,18 @@ func (c *wsConn) RemoteAddr() net.Addr {
 
 // SetDeadline sets both read and write deadlines.
 // WebSocket uses a single deadline for all operations.
+// Previous deadline contexts are not cancelled here because the websocket
+// library may still reference them internally. They expire naturally when
+// their deadline passes, and all are cancelled when baseCtx is cancelled
+// on Close().
 func (c *wsConn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
-	c.deadline = t
+	if t.IsZero() {
+		c.deadlineCtx = nil
+		c.deadlineCancel = nil
+	} else {
+		c.deadlineCtx, c.deadlineCancel = context.WithDeadline(c.baseCtx, t)
+	}
 	c.mu.Unlock()
 	return nil
 }
