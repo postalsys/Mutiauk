@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.15](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.14...mutiauk-v0.2.15) (2026-02-07)
+
+
+### Bug Fixes
+
+* resolve memory leaks, race conditions, and concurrency issues ([6211e42](https://github.com/postalsys/Mutiauk/commit/6211e4206367c1c77dd2b4a86da54d746d1f8414))
+
 ## [0.2.14](https://github.com/postalsys/Mutiauk/compare/mutiauk-v0.2.13...mutiauk-v0.2.14) (2026-01-16)
 
 
